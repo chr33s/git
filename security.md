@@ -2,13 +2,27 @@
 
 ## Supported Versions
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 1.0.x   | :white_check_mark: |
+The current `0.1.x` development line is prerelease software and is not
+production-qualified. There is no published stable release or established
+backport/support window. Report issues against the current source revision and
+include the exact commit or executable build information. Production support
+and security-update commitments remain part of the [release checklist](todo.md).
 
 ## Reporting a Vulnerability
 
-Report vulnerabilities to active maintainers with reproducible steps and clear impact assessment. We will create a GitHub security advisory to coordinate disclosure and may invite you to collaborate.
+Use [GitHub's private vulnerability report form](https://github.com/chr33s/git/security/advisories/new)
+to contact this repository's maintainers. Keep exploit details and sensitive
+repository data out of public issues, pull requests, and logs.
+
+Include the affected revision/version, host and runtime, required privileges,
+minimal reproduction, expected and observed behavior, and security impact.
+Use synthetic repository content and redact tokens, private keys, and personal
+data. If private reporting is unavailable, open a public issue requesting a
+private contact channel without disclosing the vulnerability itself.
+
+Maintainers can use the private advisory to coordinate a fix and disclosure.
+No response-time or fix-time guarantee is currently published. The safe-harbor
+conditions below continue to apply.
 
 ## Safe Harbor
 

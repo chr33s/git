@@ -301,6 +301,49 @@ describe("Protocol negotiation", () => {
 });
 
 describe("receive-pack", () => {
+  for (const [payload, accepted] of [
+    ["0000", true],
+    ["", false],
+    ["0000junk", false],
+    ["0001", false],
+  ] as const) {
+    it.effect(
+      `handles empty receive-pack framing ${JSON.stringify(payload)} without changing refs`,
+      () =>
+        Effect.promise(async () => {
+          await scenario(
+            Effect.gen(function* () {
+              const repository = yield* Repository;
+              const before = yield* repository.commit({
+                branch: "main",
+                tree: EMPTY_TREE_OID,
+                message: "retained",
+                author: alice,
+              });
+              const result = yield* Protocol.receivePack(
+                new Request("http://host/repo/git-receive-pack", { method: "POST", body: payload }),
+              ).pipe(
+                Effect.flatMap((response) =>
+                  Effect.promise(async () => {
+                    assert.equal(response.status, 200);
+                    assert.equal(
+                      response.headers.get("content-type"),
+                      "application/x-git-receive-pack-result",
+                    );
+                    assert.equal((await response.arrayBuffer()).byteLength, 0);
+                    return true;
+                  }),
+                ),
+                Effect.catchTag("Invalid", () => Effect.succeed(false)),
+              );
+              assert.equal(result, accepted);
+              assert.equal(yield* repository.resolve("refs/heads/main"), before);
+            }),
+          );
+        }),
+    );
+  }
+
   it.live("refuses a ref name per-ref and applies the rest of the push", () =>
     Effect.gen(function* () {
       const repository = yield* Repository;
@@ -1174,4 +1217,34 @@ describe("advertisement hiding", () => {
       assert.ok(text.includes("refs/hub/pr/1"), text);
     }),
   );
+});
+
+describe("upload-pack authentication probes", () => {
+  for (const version of ["version=0", "version=2"]) {
+    for (const payload of ["0000", "", "0000junk", "0001"]) {
+      it(`${version} accepts only the flush-only probe: ${JSON.stringify(payload)}`, async () => {
+        await scenario(
+          Effect.gen(function* () {
+            const repository = yield* Repository;
+            const before = yield* repository.refs;
+            const response = yield* Protocol.uploadPack(
+              new Request("http://host/repo/git-upload-pack", {
+                method: "POST",
+                headers: { "git-protocol": version },
+                body: payload,
+              }),
+            ).pipe(Effect.result);
+            if (payload === "0000") {
+              assert.equal(response._tag, "Success");
+              if (response._tag === "Success") {
+                assert.equal(response.success.status, 200);
+                assert.equal(yield* Effect.promise(() => response.success.text()), "");
+              }
+            } else assert.equal(response._tag, "Failure");
+            assert.deepEqual(yield* repository.refs, before);
+          }),
+        );
+      });
+    }
+  }
 });

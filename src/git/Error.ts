@@ -45,6 +45,29 @@ export class StorageFailure extends Schema.TaggedError<StorageFailure>()(
   { httpApiStatus: 500 },
 ) {}
 
+/** Headers may already be sent; response-stream expiry cannot replace them. */
+export class ResponseTimeout extends Schema.TaggedError<ResponseTimeout>()(
+  "ResponseTimeout",
+  { kind: Schema.Literals(["idle", "absolute"]) },
+  { httpApiStatus: 504 },
+) {
+  override get message() {
+    return `response ${this.kind} deadline exceeded`;
+  }
+}
+
+export class LfsQuotaExceeded extends Schema.TaggedError<LfsQuotaExceeded>()(
+  "LfsQuotaExceeded",
+  { resource: Schema.Literals(["bytes", "objects"]) },
+  { httpApiStatus: 507 },
+) {}
+
+export class LfsQuotaBusy extends Schema.TaggedError<LfsQuotaBusy>()(
+  "LfsQuotaBusy",
+  {},
+  { httpApiStatus: 503 },
+) {}
+
 /** A source anchor could not be inspected by the selected resolver. */
 export class AnchorResolutionFailure extends Schema.TaggedError<AnchorResolutionFailure>()(
   "AnchorResolutionFailure",
@@ -65,6 +88,13 @@ export class Invalid extends Schema.TaggedError<Invalid>()(
   { httpApiStatus: 400 },
 ) {}
 
+/** An aggregate request budget was exceeded before further work was admitted. */
+export class RequestLimitExceeded extends Schema.TaggedError<RequestLimitExceeded>()(
+  "RequestLimitExceeded",
+  { budget: Schema.String, limit: Schema.Number },
+  { httpApiStatus: 413 },
+) {}
+
 /** A hook rejected a push; carried as a value, not thrown. */
 export class HookRejected extends Schema.TaggedError<HookRejected>()(
   "HookRejected",
@@ -83,6 +113,7 @@ export type GitError =
   | StorageFailure
   | AnchorResolutionFailure
   | Invalid
+  | RequestLimitExceeded
   | HookRejected;
 
 export const GitError = Schema.Union([
@@ -92,6 +123,7 @@ export const GitError = Schema.Union([
   StorageFailure,
   AnchorResolutionFailure,
   Invalid,
+  RequestLimitExceeded,
   HookRejected,
 ]);
 
@@ -106,6 +138,8 @@ export const statusOf = (error: GitError): number => {
       return 404;
     case "RefConflict":
       return 409;
+    case "RequestLimitExceeded":
+      return 413;
     case "PackCorrupt":
       return 422;
     case "StorageFailure":

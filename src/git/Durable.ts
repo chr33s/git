@@ -16,6 +16,8 @@ import { FetchHttpClient, HttpClient, HttpRouter, HttpServerResponse } from "eff
 
 import { registryContract } from "../artifacts/Registry.contract.ts";
 import { sqlite } from "../artifacts/Sqlite.ts";
+import { sqliteCapacityContract } from "../artifacts/Sqlite.capacity.contract.ts";
+import { sqliteFailureContract } from "../artifacts/Sqlite.failure.contract.ts";
 import * as Api from "../server/Api.ts";
 import { syntax as anchorSyntax } from "../hub/Anchor.syntax.ts";
 import * as Auth from "../server/Auth.ts";
@@ -32,6 +34,17 @@ import { collector } from "./Conformance.ts";
 import * as GitRepository from "./Repository.ts";
 import { Repository } from "./Repository.ts";
 import { storeContract } from "./Store.contract.ts";
+import { requestUploadContract } from "../host/RequestUpload.contract.ts";
+import { responseDeliveryContract } from "../host/ResponseDelivery.contract.ts";
+import { lfsCapacityContract } from "../server/LfsCapacity.cloudflare.contract.ts";
+import { lfsCancellationContract } from "../server/Lfs.cloudflare.contract.ts";
+import { cloudflareMutationContract } from "./Cloudflare.mutations.contract.ts";
+import { cloudflareRefsContract } from "./Cloudflare.refs.contract.ts";
+import { cloudflareCorruptionContract } from "./Cloudflare.corruption.contract.ts";
+import { gitCapacityContract } from "./Capacity.cloudflare.contract.ts";
+import { headCapacityContract } from "./HeadCapacity.cloudflare.contract.ts";
+import { metadataCapacityContract } from "./MetadataCapacity.cloudflare.contract.ts";
+import { registryCapacityContract } from "../server/RegistryCapacity.contract.ts";
 
 /**
  * This worker's bindings, as `wrangler.test.json` provides them. Declared by
@@ -305,6 +318,17 @@ export class GitRepo extends DurableObject<TestEnv> {
     const bucket = this.env.GIT_OBJECTS;
     const storage = this.ctx.storage;
     const { report, runner } = collector();
+    responseDeliveryContract(runner);
+    requestUploadContract(runner);
+    lfsCancellationContract(bucket, repo, runner);
+    lfsCapacityContract(bucket, repo, runner);
+    cloudflareMutationContract(bucket, repo, runner);
+    cloudflareRefsContract(storage, repo, runner);
+    cloudflareCorruptionContract(storage, repo, runner);
+    headCapacityContract(storage, repo, runner);
+    gitCapacityContract(bucket, storage, repo, runner);
+    metadataCapacityContract(storage, repo, runner);
+    registryCapacityContract(storage.sql, runner);
 
     storeContract(
       "Cloudflare",
@@ -336,6 +360,10 @@ export class GitRepo extends DurableObject<TestEnv> {
 
     const sql = this.ctx.storage.sql;
     const { report, runner } = collector();
+    const registrySql = {
+      exec: sql.exec.bind(sql),
+      transactionSync: this.ctx.storage.transactionSync.bind(this.ctx.storage),
+    };
 
     registryContract(
       "Durable Object SQLite",
@@ -345,11 +373,18 @@ export class GitRepo extends DurableObject<TestEnv> {
           // it is what creates them. One DO instance runs every case.
           sql.exec(`DROP TABLE IF EXISTS repos`);
           sql.exec(`DROP TABLE IF EXISTS tokens`);
-          return Effect.runPromise(effect.pipe(Effect.provide(sqlite(sql))));
+          return Effect.runPromise(effect.pipe(Effect.provide(sqlite(registrySql))));
         },
       },
       runner,
     );
+
+    sqliteFailureContract((body) => body(registrySql), runner);
+    sqliteCapacityContract((body) => {
+      sql.exec("DROP TABLE IF EXISTS repos");
+      sql.exec("DROP TABLE IF EXISTS tokens");
+      return body(registrySql);
+    }, runner);
 
     return Response.json(await report());
   }

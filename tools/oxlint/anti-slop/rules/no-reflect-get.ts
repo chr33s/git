@@ -15,7 +15,7 @@ export const noReflectGetRule = defineRule({
         "Replace `Reflect.get` with typed property access. Parse dynamic input into a named domain type before reading it.",
     },
   },
-  create(context) {
+  createOnce(context) {
     return {
       CallExpression(node) {
         if (node.callee.type === "Super" || node.callee.type === "V8IntrinsicExpression") return;

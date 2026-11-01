@@ -17,7 +17,16 @@
  */
 import { Context, Effect, Option, Predicate, Schema, Stream } from "effect";
 
-import { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
+import {
+  Invalid,
+  LfsQuotaBusy,
+  LfsQuotaExceeded,
+  ObjectNotFound,
+  RequestLimitExceeded,
+  StorageFailure,
+} from "../git/Error.ts";
+import * as RequestBody from "./RequestBody.ts";
+import * as RequestLimits from "./RequestLimits.ts";
 import { permits } from "../trust/Certificate.ts";
 import * as Auth from "./Auth.ts";
 import { bytesToHex, concatBytes } from "../git/Format.ts";
@@ -48,7 +57,7 @@ export class LfsStore extends Context.Service<
     readonly write: (
       oid: string,
       body: Stream.Stream<Uint8Array, StorageFailure>,
-    ) => Effect.Effect<LfsObject, StorageFailure | Invalid>;
+    ) => Effect.Effect<LfsObject, StorageFailure | Invalid | LfsQuotaBusy | LfsQuotaExceeded>;
   }
 >()("server/LfsStore") {}
 
@@ -113,15 +122,30 @@ const hrefFor = (request: Request, oid: string): string => {
   return url.toString();
 };
 
+const storageFailure = (operation: "batch" | "download" | "upload") =>
+  Effect.logError("LFS storage unavailable; inspect storage before retrying", {
+    component: "Lfs",
+    event: "storage_failure",
+    operation,
+  });
+
 const batch = (request: Request): Effect.Effect<Response, never, LfsStore> =>
   Effect.gen(function* () {
     const store = yield* LfsStore;
-
-    const parsed = yield* Effect.tryPromise(() => request.json()).pipe(
-      Effect.flatMap(Schema.decodeUnknownEffect(BatchRequest)),
-      Effect.orElseSucceed(() => null),
-    );
+    const limits = yield* RequestLimits.current;
+    const input = yield* RequestBody.text(request, limits.lfsBatchBytes).pipe(Effect.result);
+    if (input._tag === "Failure") {
+      return Schema.is(RequestLimitExceeded)(input.failure)
+        ? failure(413, "LFS batch byte limit exceeded")
+        : failure(400, "malformed batch request");
+    }
+    const parsed = yield* Schema.decodeEffect(Schema.fromJsonString(BatchRequest))(
+      input.success,
+    ).pipe(Effect.orElseSucceed(() => null));
     if (parsed === null) return failure(400, "malformed batch request");
+    if ((parsed.objects?.length ?? 0) > limits.lfsBatchObjects) {
+      return failure(413, "LFS batch object limit exceeded");
+    }
 
     const operation = parsed.operation;
     if (operation !== "download" && operation !== "upload") {
@@ -140,7 +164,7 @@ const batch = (request: Request): Effect.Effect<Response, never, LfsStore> =>
         const oid = Predicate.isString(requested.oid) ? requested.oid : "";
         const size = Predicate.isNumber(requested.size) ? requested.size : -1;
 
-        if (!isLfsOid(oid) || size < 0) {
+        if (!isLfsOid(oid) || !Number.isSafeInteger(size) || size < 0) {
           return {
             oid,
             size: Math.max(size, 0),
@@ -148,7 +172,16 @@ const batch = (request: Request): Effect.Effect<Response, never, LfsStore> =>
           };
         }
 
-        const existing = yield* store.head(oid).pipe(Effect.orElseSucceed(() => null));
+        if (operation === "upload" && size > limits.lfsUploadBytes) {
+          return { oid, size, error: { code: 413, message: "LFS upload byte limit exceeded" } };
+        }
+
+        const lookedUp = yield* store.head(oid).pipe(Effect.result);
+        if (lookedUp._tag === "Failure") {
+          yield* storageFailure("batch");
+          return { oid, size, error: { code: 500, message: "object storage unavailable" } };
+        }
+        const existing = lookedUp.success;
         const href = hrefFor(request, oid);
 
         if (operation === "download") {
@@ -177,22 +210,26 @@ const download = (oid: string): Effect.Effect<Response, never, LfsStore> =>
     const store = yield* LfsStore;
     if (!isLfsOid(oid)) return failure(422, "invalid oid");
 
-    const found = yield* store.head(oid).pipe(Effect.orElseSucceed(() => null));
+    const found = yield* store.head(oid);
     if (found === null) return failure(404, "object not found");
 
-    return yield* store.read(oid).pipe(
-      Effect.map(
-        (stream) =>
-          new Response(Stream.toReadableStream(stream), {
-            headers: {
-              "content-type": "application/octet-stream",
-              "content-length": String(found.size),
-            },
-          }),
-      ),
-      Effect.orElseSucceed(() => failure(404, "object not found")),
+    const stream = yield* store.read(oid);
+    const body = yield* Stream.toReadableStreamEffect(
+      stream.pipe(Stream.tapError(() => storageFailure("download"))),
     );
-  });
+    return new Response(body, {
+      headers: {
+        "content-type": "application/octet-stream",
+        "content-length": String(found.size),
+      },
+    });
+  }).pipe(
+    Effect.catchTags({
+      ObjectNotFound: () => Effect.succeed(failure(404, "object not found")),
+      StorageFailure: () =>
+        storageFailure("download").pipe(Effect.as(failure(500, "object storage unavailable"))),
+    }),
+  );
 
 const upload = (
   request: Request,
@@ -202,7 +239,7 @@ const upload = (
     const store = yield* LfsStore;
     if (!isLfsOid(oid)) return failure(422, "invalid oid");
 
-    // Uploading writes unbounded content and moves no ref, so the policy
+    // Uploading writes content and moves no ref, so the policy
     // boundary never sees it and the guard's charge is deliberately coarse: a
     // write is `source.push` *or* `source.delete`, since the guard cannot read
     // a push's commands. Left at that, a credential scoped to delete a branch
@@ -215,23 +252,49 @@ const upload = (
       return failure(403, "uploading an LFS object needs source.push");
     }
 
-    const body = request.body;
-    const bytes: Stream.Stream<Uint8Array, StorageFailure> =
-      body === null
-        ? Stream.empty
-        : Stream.fromReadableStream({
-            evaluate: () => body,
-            onError: (cause) => new StorageFailure({ operation: "lfs.upload", path: oid, cause }),
-          });
+    const limits = yield* RequestLimits.current;
+    const opened = yield* RequestBody.open(request, limits.lfsUploadBytes, "LFS upload bytes").pipe(
+      Effect.result,
+    );
+    if (opened._tag === "Failure") return failure(400, "unsupported upload encoding");
+    // Stores wrap transport failures in StorageFailure. Remember a budget
+    // rejection at the reader boundary so disk/R2 wrappers cannot turn it
+    // into a misleading storage outage response.
+    let overflow = false;
+    const bytes = Stream.fromAsyncIterable(opened.success, (cause) => {
+      overflow = Schema.is(RequestLimitExceeded)(cause);
+      return new StorageFailure({ operation: "lfs.upload", path: oid, cause });
+    });
 
     return yield* store.write(oid, bytes).pipe(
       Effect.map(() => new Response(null, { status: 200 })),
       Effect.catchTags({
         Invalid: (error) => Effect.succeed(failure(422, error.reason)),
-        StorageFailure: () => Effect.succeed(failure(500, "could not store object")),
+        LfsQuotaExceeded: (error) =>
+          Effect.logWarning("LFS retained capacity exhausted", {
+            component: "Lfs",
+            event: "quota_exceeded",
+            resource: error.resource,
+          }).pipe(Effect.as(failure(507, "LFS retained capacity exceeded"))),
+        LfsQuotaBusy: () =>
+          Effect.logWarning("LFS writer lock held; retry or reconcile after stopping writers", {
+            component: "Lfs",
+            event: "quota_lock_held",
+          }).pipe(
+            Effect.as(
+              new Response(null, {
+                status: 503,
+                headers: { "retry-after": "1", "cache-control": "no-store" },
+              }),
+            ),
+          ),
+        StorageFailure: () =>
+          overflow
+            ? Effect.succeed(failure(413, "LFS upload byte limit exceeded"))
+            : storageFailure("upload").pipe(Effect.as(failure(500, "could not store object"))),
       }),
     );
-  });
+  }).pipe(Effect.scoped);
 
 /**
  * Route an LFS request whose repository the caller has already resolved.

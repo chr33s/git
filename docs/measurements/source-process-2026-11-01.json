@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-01",
+  "kind": "source-coordinator-process-death",
+  "platform": "darwin-arm64",
+  "sourceSha256": {
+    "src/host/SourceRelease.process.test.ts": "9ed76929e06724589b56d5566133720c8b7b1d6a8f637a40aac1ac2b54a4c664",
+    "tools/cloudflare-source-release.ts": "7b9aaf5897b8aedc91e32a144d65bad6db721a0f05bbea99c9ba2164d0a4c7c0",
+    "tools/cloudflare-restore-journal.ts": "9436dc026bda1e243ad974faabd98fe347e5397c5f477edd796365e2ad4973a6"
+  },
+  "tests": {
+    "node24.12.0": {
+      "combinedRecoverySuite": {
+        "files": 4,
+        "passed": 20,
+        "skipped": 0,
+        "logSha256": "59387cfb04bd439b5fa82c691cad6e5f0a514f5f631679a3f06a7597e6bfee78"
+      },
+      "finalProcessTestsAfterSchemaLintFix": {
+        "files": 1,
+        "passed": 3,
+        "skipped": 0,
+        "logSha256": "e89d635c84bbb3abafcedd19911606481abe6d261cf4de3a2800960d88fd0c6c"
+      },
+      "strictReporter": true
+    },
+    "node26.10.0": {
+      "combinedRecoverySuite": {
+        "files": 4,
+        "passed": 20,
+        "skipped": 0,
+        "logSha256": "ed3cad9337aac1a9b29c3c25e13853edbd42b8fea7e08af75046753c844cd05d"
+      },
+      "finalProcessTestsAfterSchemaLintFix": {
+        "files": 1,
+        "passed": 3,
+        "skipped": 0,
+        "logSha256": "3ae717ac2da53c9470ad25f9e18cf382e9eac6f58680f2f71163265ec6e39a5b"
+      },
+      "strictReporter": true
+    }
+  },
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "4f6a500893f8c3f1800854af8077ab43255acab5576d3bc26550d96e4baae4a9"
+  },
+  "coverage": [
+    "Actual releaseCapturedSources runs in a child process against a parent-owned native DO/R2 fixture through a test-only loopback bridge.",
+    "SIGKILL before the first source Release leaves both sources held and both journal rows pending.",
+    "SIGKILL after remote Release before acknowledgement leaves the first source open and its journal row pending.",
+    "SIGKILL on the second Release request proves the first acknowledgement was journaled; restart skips that source.",
+    "Journal integrity and release phases are checked after process death; DOs are evicted before restart.",
+    "Restart rechecks the archive bucket, completes release and skips committed progress.",
+    "A new process terminal retry performs no R2 or source RPC and preserves a later backup hold."
+  ],
+  "limits": [
+    "Two empty native objects and empty copied R2 bucket; no production-sized object transfer.",
+    "Loopback fixture transport is not a configured remote production operator transport.",
+    "Target restore/release coordinator process-death qualification remains open.",
+    "No deployed Cloudflare, power-loss or network-filesystem durability claim."
+  ]
+}

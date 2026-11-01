@@ -28,7 +28,12 @@
 import { Context, Effect, Layer, Option, Schema } from "effect";
 
 import * as Dag from "../git/Dag.ts";
-import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
+import {
+  Invalid,
+  type ObjectNotFound,
+  type RequestLimitExceeded,
+  type StorageFailure,
+} from "../git/Error.ts";
 import * as Refspec from "../git/Refspec.ts";
 import { Repository } from "../git/Repository.ts";
 import { type Oid, type RefUpdate, storageOf } from "../git/Store.ts";
@@ -1381,7 +1386,7 @@ interface LogNamespace {
   readonly isCommit: (commit: Oid) => Effect.Effect<boolean, StorageFailure, Repository>;
   readonly withinCeiling: (
     head: Oid,
-  ) => Effect.Effect<boolean, ObjectNotFound | StorageFailure, Repository>;
+  ) => Effect.Effect<boolean, ObjectNotFound | RequestLimitExceeded | StorageFailure, Repository>;
   readonly ceilingOf: () => Effect.Effect<number>;
   readonly record: string;
   /**

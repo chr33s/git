@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-30",
+  "kind": "offline-namespace-archive-command",
+  "sourceSha256": {
+    "tools/verify-cloudflare-backup.ts": "552397a7ccb047e2f154af6595c5ddcd61a7083b264700398b1d20f6ad819054",
+    "tools/cloudflare-namespace-archive.ts": "081fa699f4ef754c9dc79dae8b31df44a52731cf8285dbf46cf0dc158ae8169b",
+    "tools/cloudflare-backup-read.ts": "941a7300d948048f685a32e6f384f1babbf0259326de38ac89e76ff558476c76",
+    "src/host/BackupCodec.test.ts": "c5b99832808726112691ba3af5b4f56628cb70e9f1b4e5b220bf3df2e52e3936"
+  },
+  "tests": {
+    "node24.12.0": {
+      "files": 1,
+      "passed": 2,
+      "logSha256": "badfc5681a19c8160de2f4097f0fb176059e27b1503ac06de34aa6e422f81e81"
+    },
+    "node26.10.0": {
+      "files": 1,
+      "passed": 2,
+      "logSha256": "c6e7b81f583d924073a214faa025bbdb4104cd0fcb23577064538825f6db3883"
+    }
+  },
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "fcd5e6f96bc4c166a1ec1147c8d628a7b0ba7be2377140d535e3203bd8b13431"
+  },
+  "coverage": [
+    "Real CLI subprocess verifies a signed native two-object namespace archive without Cloudflare API credentials.",
+    "JSON report includes authenticated completion and explicitly identifies unverified R2, isolation and application-recovery requirements.",
+    "Wrong signing fingerprint, snapshot and deployment digest reject without success output.",
+    "Malformed/oversized trust files, symlinked trust files and a trust file stored inside the archive reject.",
+    "Missing object packet rejects through the command.",
+    "Failure diagnostics omit the private trust payload."
+  ],
+  "limits": [
+    "Trust-file placement is a guardrail; independent operator custody and authenticity remain required.",
+    "No R2 readback, target RPC, installation-wide isolation or recovered application verification is performed.",
+    "Source checkout and installed dependencies are needed; connected operator CLI and deployed recovery remain open."
+  ]
+}

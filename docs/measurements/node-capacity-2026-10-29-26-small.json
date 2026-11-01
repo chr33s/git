@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "measuredAt": "2026-10-29T15:10:56.095Z",
+  "revision": "54c6199b79d3b121ad7964ac8d0edaeba85b4666",
+  "dirty": true,
+  "platform": "darwin",
+  "arch": "arm64",
+  "osRelease": "27.0.0",
+  "node": "v26.10.0",
+  "git": "git version 2.56.0",
+  "cpu": "Apple M5 Max",
+  "logicalCpus": 18,
+  "totalMemoryBytes": 137438953472,
+  "workload": {
+    "dataMiB": 16,
+    "commits": 64,
+    "concurrency": 2,
+    "packed": true,
+    "private": true,
+    "objects": "count: 0\nsize: 0\nin-pack: 216\npacks: 1\nsize-pack: 16411\nprune-packable: 0\ngarbage: 0\nsize-garbage: 0\n"
+  },
+  "requests": [
+    {
+      "milliseconds": 870.8660839999998,
+      "transferred": true,
+      "verified": true,
+      "failure": null
+    },
+    {
+      "milliseconds": 813.3357910000004,
+      "transferred": true,
+      "verified": true,
+      "failure": null
+    }
+  ],
+  "elapsedMs": 870.916416,
+  "recoveryCloneVerified": true,
+  "host": {
+    "baselineRssBytes": 184647680,
+    "maxRssKiB": 332752,
+    "userCpuMicroseconds": 2190903,
+    "systemCpuMicroseconds": 203750,
+    "fetchGraphSteps": 250000,
+    "limits": {
+      "active": 32,
+      "perRepository": 8,
+      "connections": 128,
+      "deadlineMs": 300000,
+      "idleMs": 30000,
+      "headersMs": 15000
+    }
+  },
+  "limitsOfEvidence": "One loopback burst; shared OS file cache; host metrics exclude Git clients and include recovery clone. Not a supported-size or saturation claim."
+}

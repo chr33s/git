@@ -11,6 +11,7 @@ import { Effect, Schema } from "effect";
 
 import { Theme } from "./app.model.ts";
 import { AppMessage } from "./app.message.ts";
+import { DialogName } from "./controls.ts";
 import * as palette from "./theme.ts";
 
 /**
@@ -71,6 +72,17 @@ export const FocusSearch = Command.define("FocusSearch", {
   execute: ({ selector }) =>
     Dom.focus(selector).pipe(
       Effect.as(AppMessage.CompletedFocus()),
+      Effect.orElseSucceed(() => AppMessage.CompletedFocus()),
+    ),
+});
+
+/** Safari does not necessarily focus a button on pointer activation. */
+export const FocusDialogTrigger = Command.define("FocusDialogTrigger", {
+  args: { name: DialogName },
+  messages: [AppMessage.FocusedDialogTrigger, AppMessage.CompletedFocus],
+  execute: ({ name }) =>
+    Dom.focus(`[data-dialog-trigger="${name}"]`).pipe(
+      Effect.as(AppMessage.FocusedDialogTrigger({ name })),
       Effect.orElseSucceed(() => AppMessage.CompletedFocus()),
     ),
 });

@@ -1,0 +1,49 @@
+{
+  "date": "2026-10-30",
+  "platform": "darwin",
+  "architecture": "arm64",
+  "git": "git version 2.56.0",
+  "head": "54c6199b79d3b121ad7964ac8d0edaeba85b4666",
+  "sourceState": "Uncommitted worktree; not a release artifact certification",
+  "sourceFingerprint": {
+    "algorithm": "sha256",
+    "selection": "git ls-files --cached --others --exclude-standard -- src tools patches package.json package-lock.json tsconfig.json vite.config.ts .github; unique sorted paths, path NUL contents NUL",
+    "files": 646,
+    "digest": "ed0d519535824846a639464d60c5627cf915a52a293198f2304597e4a4bc2416"
+  },
+  "results": [
+    {
+      "node": "26.10.0",
+      "command": "npm test",
+      "exitCode": 0,
+      "files": 259,
+      "passed": 2728,
+      "skipped": 11,
+      "durationSeconds": 478.79,
+      "strictReporter": false,
+      "logSha256": "d8b997883c627ac52cc1d92034d88dedfb5192cb69d18b02e0a8b78074bf4e41"
+    },
+    {
+      "node": "24.12.0",
+      "command": "npm exec --yes --package=node@24.12.0 -- node node_modules/vite-plus/bin/vp test run --reporter=default --reporter=./tools/release-test-reporter.ts",
+      "exitCode": 0,
+      "files": 259,
+      "passed": 2728,
+      "skipped": 11,
+      "durationSeconds": 494.95,
+      "strictReporter": true,
+      "logSha256": "44d6d5bf30bd778cf8613cf01a1a2a8954e4c328570005a07b59bd9a3292a264"
+    }
+  ],
+  "skipEvidence": {
+    "node26": "Separate strict-reporter Node.test.ts run: 42 passed, 11 documented Linux-only /proc descriptor skips; total full-suite skips also 11",
+    "node24": "Whole-suite strict reporter accepted only the 11 documented platform skips"
+  },
+  "prerequisiteEvidence": "node tools/release-preflight.ts standalone passed: Git 2.56.0/backend, SSH key generation, tar/unzip, Chromium launch, source baseline, existing CLI/helper and UI assets",
+  "limitsOfEvidence": [
+    "macOS arm64 only; no remote CI or target-account qualification",
+    "Existing standalone binary exercised but not rebuilt/certified for this source fingerprint",
+    "Ignored generated inputs and dist artifacts are excluded from the source fingerprint",
+    "Production platform/channel decisions, account controls and deployment/operational acceptance remain open"
+  ]
+}

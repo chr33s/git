@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "measuredAt": "2026-10-31T22:41:18Z",
+  "platform": "Linux-6.8.0-117-generic-aarch64-with-glibc2.36",
+  "arch": "aarch64",
+  "build": {
+    "schemaVersion": 1,
+    "version": "0.1.1",
+    "revision": "54c6199b79d3b121ad7964ac8d0edaeba85b4666",
+    "dirty": true,
+    "node": "26.13.0",
+    "platform": "linux",
+    "arch": "arm64",
+    "packageLockSha256": "5ec892c20a774622885a7b8400be409fae7f3b2d14c038c924f570eb8773d1f9"
+  },
+  "runtimeImage": "debian@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3",
+  "archiveSha256": "608ae1b079a31af49368f436b78cd3bec959101f722bad662a97673325f4209e",
+  "release": {
+    "schemaVersion": 1,
+    "kind": "rehearsal",
+    "version": "0.1.1",
+    "revision": "54c6199b79d3b121ad7964ac8d0edaeba85b4666",
+    "dirty": true
+  },
+  "executableSha256": "81a9a6d5f202df16a3389ddfe9cb358530ec25a458c27f3ec85f83dd26b01020",
+  "git": "git version 2.39.5",
+  "nodeAbsent": true,
+  "sourceCheckoutAbsent": true,
+  "installedChecksumsVerified": true,
+  "embeddedUiServed": true,
+  "privateAnonymousReadDenied": true,
+  "identityClonePushFetchVerified": true,
+  "repositoryIdentityPinned": true,
+  "nativeGitFsckPassed": true,
+  "limitsOfEvidence": "Isolated Debian runtime only; not publisher authentication, platform signing, full OS qualification or browser rendering.",
+  "source": {
+    "files": 695,
+    "sha256": "f1844dab7a6033303500e0b0f0bc455c2e9961f34432eca58329d35ebc9b2056"
+  },
+  "freshDependencyInstallation": true,
+  "miniflarePatchApplied": true,
+  "buildImage": "node@sha256:bc0a2afd3b74ce12222fc8bab99271e66257f021078f5f4a5d687a77d280c1d9",
+  "sourceMatchesFullMacOsBaseline": true,
+  "retainedDirectory": "dist/rehearsals/linux-current-20261101-5x9l1yc1",
+  "sourceTarSha256": "bea60ba1e993685abfdfed8cc01eca98b37b0ab1b9223f4ca40b2cece53128ad",
+  "historyBundleSha256": "855dd3de63008ef8c0fac8cef12fd714058c59413fb3a1fecb19197c353bb93b",
+  "buildLogSha256": "d226ba867f62c156430f6cf6a76d955cadbbec2a0451df61576ecfbbdc16fc2a",
+  "installationLogSha256": "27074d4be63c90c56972c85fcec961be395086bfd3ee24db88ace68e0c108720"
+}

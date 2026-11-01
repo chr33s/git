@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { describe, it } from "@effect/vitest";
 
-import { Effect, Layer } from "effect";
+import { Effect, Layer, Logger } from "effect";
 
 import { fetchRepository } from "../client/Fetch.ts";
 import { EMPTY_TREE_OID } from "../git/Format.ts";
@@ -46,6 +46,52 @@ const advertisement = (base: string): Request =>
   new Request(`${base}/info/refs?service=git-upload-pack`);
 
 describe("Snapshot", () => {
+  it.effect("reports failed and invalid snapshot reads without logging private data", () =>
+    Effect.gen(function* () {
+      const secret = "fixture-private-repo-and-credential";
+      const logged: string[] = [];
+      const logger = Logger.make<unknown, void>(({ message }) => {
+        logged.push(JSON.stringify(message));
+      });
+      for (const read of [Effect.fail(secret), Effect.die(new Error(secret))]) {
+        const snapshot = yield* Snapshot.load(read).pipe(Effect.provide(Logger.layer([logger])));
+        assert.equal(snapshot, null);
+      }
+      const invalid = yield* Snapshot.load(Effect.succeed(new TextEncoder().encode(secret))).pipe(
+        Effect.provide(Logger.layer([logger])),
+      );
+      assert.equal(invalid, null);
+      assert.equal(logged.length, 3);
+      assert.equal(logged.filter((line) => line.includes('"operation":"read"')).length, 2);
+      assert.equal(logged.filter((line) => line.includes('"operation":"decode"')).length, 1);
+      assert.ok(logged.every((line) => line.includes('"component":"SnapshotReader"')));
+      assert.equal(logged.join("\n").includes(secret), false);
+      const privateSnapshot: Snapshot.Published = {
+        version: 1,
+        publishedAt: "2026-10-29T00:00:00.000Z",
+        head: "refs/heads/main",
+        anonymousRead: false,
+        refs: [],
+      };
+      for (const expected of [null, privateSnapshot, { ...privateSnapshot, anonymousRead: true }]) {
+        const read = Effect.succeed(expected === null ? null : Snapshot.encode(expected));
+        assert.deepEqual(
+          yield* Snapshot.load(read).pipe(Effect.provide(Logger.layer([logger]))),
+          expected,
+        );
+      }
+      assert.equal(
+        logged.filter((message) => !message.includes('"operation":"observed"')).length,
+        3,
+        "missing and valid snapshots are not operational faults",
+      );
+      assert.equal(
+        logged.filter((message) => message.includes('"operation":"observed"')).length,
+        2,
+      );
+    }),
+  );
+
   it.effect("publishes, reads and restores shallow boundaries", () =>
     Effect.gen(function* () {
       const snapshot = yield* Effect.gen(function* () {

@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-01",
+  "kind": "durable-signed-pre-hold-capture-intent",
+  "sourceSha256": {
+    "tools/cloudflare-namespace-archive.ts": "80187a4b3eb009e8e7251e24c9856029c371bfc60d4bd3eae82581b5e3730c5d",
+    "src/host/CaptureIntent.test.ts": "12630c41ce3f6b7c52eac571696e04c2527ec0ac847bd36c0f2669368736c5ba"
+  },
+  "tests": {
+    "node26.10.0": {
+      "files": 1,
+      "passed": 2,
+      "skipped": 0,
+      "strictReporter": true,
+      "logSha256": "28fa35219920a7e78bed7c3d18ff39b900f8e71df7e4ff63aaae96af13e15b2d"
+    },
+    "node24.12.0": {
+      "files": 3,
+      "passed": 6,
+      "skipped": 0,
+      "strictReporter": true,
+      "logSha256": "f2b55f5af8064858f80f34cacb7375fa95c3a8aaba1dfca60661c3477eb6dbf9"
+    }
+  },
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "077e0717a2f8e0a2c2955cb70d76d13defac3770248ea040d66ee3655fbe5a8f"
+  },
+  "verified": [
+    "Capture intent is authenticated and mode 0600 before first Hold invocation",
+    "Intent remains verifiable after second hold fails or R2 copying fails",
+    "Wrong deployment scope, snapshot ID, signer, modified discovery list and truncated intent are rejected",
+    "Intent verification performs no remote calls",
+    "Incomplete capture does not verify as complete and has no completion packet",
+    "Existing native codec and four-command CLI tests still pass"
+  ],
+  "limits": [
+    "No durable source-abandonment coordinator or CLI added yet",
+    "Does not authenticate older partial captures without the intent file",
+    "Intent is a source-set authorization record, not proof of a completed backup",
+    "No power-loss or remote deployment qualification"
+  ]
+}

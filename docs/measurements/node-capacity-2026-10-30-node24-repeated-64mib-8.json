@@ -1,0 +1,1323 @@
+{
+  "schemaVersion": 2,
+  "measuredAt": "2026-10-30T00:12:44.298Z",
+  "revision": "54c6199b79d3b121ad7964ac8d0edaeba85b4666",
+  "dirty": true,
+  "platform": "darwin",
+  "arch": "arm64",
+  "osRelease": "27.0.0",
+  "node": "v24.12.0",
+  "git": "git version 2.56.0",
+  "cpu": "Apple M5 Max",
+  "logicalCpus": 18,
+  "totalMemoryBytes": 137438953472,
+  "workload": {
+    "dataMiB": 64,
+    "commits": 64,
+    "concurrency": 8,
+    "rounds": 20,
+    "packed": true,
+    "private": true,
+    "objects": "count: 0\nsize: 0\nin-pack: 264\npacks: 1\nsize-pack: 65582\nprune-packable: 0\ngarbage: 0\nsize-garbage: 0\n"
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "elapsedMs": 8329.661417,
+      "rssKiB": 408816,
+      "requests": [
+        {
+          "round": 1,
+          "milliseconds": 4655.047416999999,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 1,
+          "milliseconds": 5742.72575,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 1,
+          "milliseconds": 6285.853791999999,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 1,
+          "milliseconds": 5192.596209000001,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 1,
+          "milliseconds": 6887.607083999999,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 1,
+          "milliseconds": 7992.949166999999,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 1,
+          "milliseconds": 7466.844666,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 1,
+          "milliseconds": 8314.836958,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        }
+      ],
+      "recoveryCloneVerified": true
+    },
+    {
+      "round": 2,
+      "elapsedMs": 8035.995791999998,
+      "rssKiB": 436496,
+      "requests": [
+        {
+          "round": 2,
+          "milliseconds": 4545.320292,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 2,
+          "milliseconds": 5531.180625000001,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 2,
+          "milliseconds": 6024.848084000001,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 2,
+          "milliseconds": 5003.741707999998,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 2,
+          "milliseconds": 6543.182792,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 2,
+          "milliseconds": 7160.452207999999,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 2,
+          "milliseconds": 7659.2906250000015,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 2,
+          "milliseconds": 8023.004792,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        }
+      ],
+      "recoveryCloneVerified": true
+    },
+    {
+      "round": 3,
+      "elapsedMs": 8107.358874999998,
+      "rssKiB": 458336,
+      "requests": [
+        {
+          "round": 3,
+          "milliseconds": 4520.297166999997,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 3,
+          "milliseconds": 5053.129333000001,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 3,
+          "milliseconds": 5519.736916000002,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 3,
+          "milliseconds": 6033.571917000001,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 3,
+          "milliseconds": 6624.831666999999,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 3,
+          "milliseconds": 7239.471833,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 3,
+          "milliseconds": 7750.845124999996,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 3,
+          "milliseconds": 8094.688374999998,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        }
+      ],
+      "recoveryCloneVerified": true
+    },
+    {
+      "round": 4,
+      "elapsedMs": 7929.959083000002,
+      "rssKiB": 475984,
+      "requests": [
+        {
+          "round": 4,
+          "milliseconds": 4953.828958999999,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 4,
+          "milliseconds": 4416.9673330000005,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 4,
+          "milliseconds": 5498.328791,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 4,
+          "milliseconds": 6006.895083000003,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 4,
+          "milliseconds": 6508.963166999994,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 4,
+          "milliseconds": 7089.443667,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 4,
+          "milliseconds": 7566.9699580000015,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 4,
+          "milliseconds": 7917.485790999999,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        }
+      ],
+      "recoveryCloneVerified": true
+    },
+    {
+      "round": 5,
+      "elapsedMs": 8120.304917000001,
+      "rssKiB": 490400,
+      "requests": [
+        {
+          "round": 5,
+          "milliseconds": 4549.322,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 5,
+          "milliseconds": 5164.125790999999,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 5,
+          "milliseconds": 5650.686333999998,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 5,
+          "milliseconds": 6117.947207999998,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 5,
+          "milliseconds": 6680.445500000002,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 5,
+          "milliseconds": 7256.046333999999,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 5,
+          "milliseconds": 7753.380209000003,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 5,
+          "milliseconds": 8107.134624999999,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        }
+      ],
+      "recoveryCloneVerified": true
+    },
+    {
+      "round": 6,
+      "elapsedMs": 8050.243999999999,
+      "rssKiB": 495040,
+      "requests": [
+        {
+          "round": 6,
+          "milliseconds": 4585.8243749999965,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 6,
+          "milliseconds": 5042.958916999996,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 6,
+          "milliseconds": 5540.199625000001,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 6,
+          "milliseconds": 6048.4780829999945,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 6,
+          "milliseconds": 6620.002666,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 6,
+          "milliseconds": 7186.556415999999,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 6,
+          "milliseconds": 7709.77399999999,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 6,
+          "milliseconds": 8037.316500000001,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        }
+      ],
+      "recoveryCloneVerified": true
+    },
+    {
+      "round": 7,
+      "elapsedMs": 8060.848999999987,
+      "rssKiB": 495280,
+      "requests": [
+        {
+          "round": 7,
+          "milliseconds": 4477.700790999996,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 7,
+          "milliseconds": 5031.697249999997,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 7,
+          "milliseconds": 5574.013207999989,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 7,
+          "milliseconds": 6064.344333000001,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 7,
+          "milliseconds": 6578.547582999992,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 7,
+          "milliseconds": 7194.991249999992,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 7,
+          "milliseconds": 8050.347542000003,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 7,
+          "milliseconds": 7687.299375000002,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        }
+      ],
+      "recoveryCloneVerified": true
+    },
+    {
+      "round": 8,
+      "elapsedMs": 8002.810042000012,
+      "rssKiB": 495248,
+      "requests": [
+        {
+          "round": 8,
+          "milliseconds": 5023.602666999999,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 8,
+          "milliseconds": 4532.387749999994,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 8,
+          "milliseconds": 5570.889292000007,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 8,
+          "milliseconds": 6057.477082999991,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 8,
+          "milliseconds": 6580.4747500000085,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 8,
+          "milliseconds": 7637.703958000013,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 8,
+          "milliseconds": 7160.429457999999,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 8,
+          "milliseconds": 7989.639999999999,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        }
+      ],
+      "recoveryCloneVerified": true
+    },
+    {
+      "round": 9,
+      "elapsedMs": 8115.1651249999995,
+      "rssKiB": 496064,
+      "requests": [
+        {
+          "round": 9,
+          "milliseconds": 5002.138208000004,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 9,
+          "milliseconds": 5561.626457999999,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 9,
+          "milliseconds": 4525.441875000004,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 9,
+          "milliseconds": 6046.278833000004,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 9,
+          "milliseconds": 6610.095124999993,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 9,
+          "milliseconds": 7227.095708000008,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 9,
+          "milliseconds": 7755.207082999987,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 9,
+          "milliseconds": 8102.521500000003,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        }
+      ],
+      "recoveryCloneVerified": true
+    },
+    {
+      "round": 10,
+      "elapsedMs": 8055.653708999991,
+      "rssKiB": 500624,
+      "requests": [
+        {
+          "round": 10,
+          "milliseconds": 5033.96650000001,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 10,
+          "milliseconds": 4488.653375000009,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 10,
+          "milliseconds": 6602.105209000001,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 10,
+          "milliseconds": 5570.653666999991,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 10,
+          "milliseconds": 6006.486250000002,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 10,
+          "milliseconds": 7169.010915999999,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 10,
+          "milliseconds": 7692.66941599999,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 10,
+          "milliseconds": 8042.631625000009,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        }
+      ],
+      "recoveryCloneVerified": true
+    },
+    {
+      "round": 11,
+      "elapsedMs": 7949.05804199999,
+      "rssKiB": 500624,
+      "requests": [
+        {
+          "round": 11,
+          "milliseconds": 4934.2253749999945,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 11,
+          "milliseconds": 4422.69975,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 11,
+          "milliseconds": 5487.536540999994,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 11,
+          "milliseconds": 6527.169207999992,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 11,
+          "milliseconds": 5961.868125000008,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 11,
+          "milliseconds": 7093.772417,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 11,
+          "milliseconds": 7587.585915999996,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 11,
+          "milliseconds": 7936.42362500001,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        }
+      ],
+      "recoveryCloneVerified": true
+    },
+    {
+      "round": 12,
+      "elapsedMs": 7948.303749999992,
+      "rssKiB": 500896,
+      "requests": [
+        {
+          "round": 12,
+          "milliseconds": 4508.266333000007,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 12,
+          "milliseconds": 4954.241999999998,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 12,
+          "milliseconds": 5447.9861669999955,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 12,
+          "milliseconds": 5929.531707999995,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 12,
+          "milliseconds": 6498.798750000016,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 12,
+          "milliseconds": 7101.673584000004,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 12,
+          "milliseconds": 7582.883082999993,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 12,
+          "milliseconds": 7935.241374999983,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        }
+      ],
+      "recoveryCloneVerified": true
+    },
+    {
+      "round": 13,
+      "elapsedMs": 7907.957958999992,
+      "rssKiB": 515376,
+      "requests": [
+        {
+          "round": 13,
+          "milliseconds": 4460.527458000026,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 13,
+          "milliseconds": 4921.372582999989,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 13,
+          "milliseconds": 5389.805082999985,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 13,
+          "milliseconds": 5898.431958000001,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 13,
+          "milliseconds": 6481.9956250000105,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 13,
+          "milliseconds": 7047.408583000011,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 13,
+          "milliseconds": 7539.721666999976,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 13,
+          "milliseconds": 7895.09937500002,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        }
+      ],
+      "recoveryCloneVerified": true
+    },
+    {
+      "round": 14,
+      "elapsedMs": 7920.797125000012,
+      "rssKiB": 515728,
+      "requests": [
+        {
+          "round": 14,
+          "milliseconds": 4423.254082999978,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 14,
+          "milliseconds": 5009.627707999985,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 14,
+          "milliseconds": 5908.705541000003,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 14,
+          "milliseconds": 5446.153584000014,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 14,
+          "milliseconds": 6509.13158299998,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 14,
+          "milliseconds": 7074.412875000009,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 14,
+          "milliseconds": 7569.616624999995,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 14,
+          "milliseconds": 7907.803083000006,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        }
+      ],
+      "recoveryCloneVerified": true
+    },
+    {
+      "round": 15,
+      "elapsedMs": 7803.539874999988,
+      "rssKiB": 516032,
+      "requests": [
+        {
+          "round": 15,
+          "milliseconds": 4409.78141700002,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 15,
+          "milliseconds": 5414.41616600001,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 15,
+          "milliseconds": 4900.112957999983,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 15,
+          "milliseconds": 5894.810832999996,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 15,
+          "milliseconds": 6426.64154099999,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 15,
+          "milliseconds": 6986.678292000026,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 15,
+          "milliseconds": 7459.691167000012,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 15,
+          "milliseconds": 7790.309500000003,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        }
+      ],
+      "recoveryCloneVerified": true
+    },
+    {
+      "round": 16,
+      "elapsedMs": 7847.304457999999,
+      "rssKiB": 519744,
+      "requests": [
+        {
+          "round": 16,
+          "milliseconds": 5876.681582999998,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 16,
+          "milliseconds": 4440.1015829999815,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 16,
+          "milliseconds": 5365.344624999998,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 16,
+          "milliseconds": 4888.034833999991,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 16,
+          "milliseconds": 6415.524540999992,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 16,
+          "milliseconds": 6988.02129199999,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 16,
+          "milliseconds": 7482.1505829999805,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 16,
+          "milliseconds": 7835.0507919999945,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        }
+      ],
+      "recoveryCloneVerified": true
+    },
+    {
+      "round": 17,
+      "elapsedMs": 7944.080041999987,
+      "rssKiB": 520496,
+      "requests": [
+        {
+          "round": 17,
+          "milliseconds": 4445.305667000008,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 17,
+          "milliseconds": 4976.803917000012,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 17,
+          "milliseconds": 5464.530834000005,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 17,
+          "milliseconds": 5940.9060839999875,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 17,
+          "milliseconds": 6492.933875000017,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 17,
+          "milliseconds": 7106.43524999998,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 17,
+          "milliseconds": 7933.109874999995,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 17,
+          "milliseconds": 7578.494999999995,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        }
+      ],
+      "recoveryCloneVerified": true
+    },
+    {
+      "round": 18,
+      "elapsedMs": 7841.075916000002,
+      "rssKiB": 520592,
+      "requests": [
+        {
+          "round": 18,
+          "milliseconds": 4408.060875000025,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 18,
+          "milliseconds": 4890.783999999985,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 18,
+          "milliseconds": 5392.950249999994,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 18,
+          "milliseconds": 5859.111791000003,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 18,
+          "milliseconds": 6408.970624999987,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 18,
+          "milliseconds": 6967.0042079999985,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 18,
+          "milliseconds": 7476.514624999982,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 18,
+          "milliseconds": 7827.464957999997,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        }
+      ],
+      "recoveryCloneVerified": true
+    },
+    {
+      "round": 19,
+      "elapsedMs": 7883.35508400001,
+      "rssKiB": 528880,
+      "requests": [
+        {
+          "round": 19,
+          "milliseconds": 4450.760833000008,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 19,
+          "milliseconds": 5469.907999999996,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 19,
+          "milliseconds": 4951.216209000006,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 19,
+          "milliseconds": 5931.208584000007,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 19,
+          "milliseconds": 6485.099291999999,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 19,
+          "milliseconds": 7025.634500000015,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 19,
+          "milliseconds": 7527.116458000004,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 19,
+          "milliseconds": 7870.769874999998,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        }
+      ],
+      "recoveryCloneVerified": true
+    },
+    {
+      "round": 20,
+      "elapsedMs": 7876.506958999991,
+      "rssKiB": 529616,
+      "requests": [
+        {
+          "round": 20,
+          "milliseconds": 4379.33137499998,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 20,
+          "milliseconds": 4917.378375,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 20,
+          "milliseconds": 5426.211291999993,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 20,
+          "milliseconds": 5910.213707999996,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 20,
+          "milliseconds": 6420.121041000006,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 20,
+          "milliseconds": 7528.766291999986,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 20,
+          "milliseconds": 7021.303458000009,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        },
+        {
+          "round": 20,
+          "milliseconds": 7862.408542000019,
+          "transferred": true,
+          "verified": true,
+          "failure": null
+        }
+      ],
+      "recoveryCloneVerified": true
+    }
+  ],
+  "rehearsalElapsedMs": 234381.49987499998,
+  "recoveryCloneVerified": true,
+  "host": {
+    "baselineRssBytes": 163790848,
+    "maxRssKiB": 529696,
+    "userCpuMicroseconds": 446115573,
+    "systemCpuMicroseconds": 32985819,
+    "fetchGraphSteps": 250000,
+    "limits": {
+      "active": 32,
+      "perRepository": 8,
+      "connections": 128,
+      "deadlineMs": 300000,
+      "idleMs": 30000,
+      "headersMs": 15000
+    }
+  },
+  "limitsOfEvidence": "Repeated loopback bursts with verification, recovery clone and cleanup between rounds; shared OS file cache. RSS samples are post-recovery, not per-round peaks; aggregate host metrics exclude Git clients and include verification gaps/recovery. Not continuous saturation or a supported-size claim."
+}

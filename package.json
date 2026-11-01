@@ -34,7 +34,8 @@
     "test:integration": "vp test run --project integration",
     "test:interop": "vp test run --project interop",
     "test:unit": "vp test run --project unit",
-    "verify:ui": "npm run build:ui && node src/ui/verify.ts"
+    "verify:ui": "npm run build:ui && node src/ui/verify.ts",
+    "verify:worker": "node tools/verify-worker.ts"
   },
   "dependencies": {
     "effect": "4.0.7",
@@ -42,6 +43,8 @@
   },
   "devDependencies": {
     "@alchemy.run/cloudflare": "2.0.0-beta.84",
+    "@alchemy.run/cloudflare-runtime": "2.0.0-beta.84",
+    "@distilled.cloud/cloudflare": "1.0.0-rc.17",
     "@effect/platform-node": "4.0.7",
     "@effect/tsgo": "0.63.0",
     "@effect/vitest": "4.0.7",
@@ -57,10 +60,13 @@
     "@pierre/trees": "1.0.0-beta.6",
     "@types/node": "26.6.6",
     "alchemy": "2.0.0-beta.84",
+    "devalue": "6.0.3",
     "foldkit": "0.169.0",
+    "miniflare": "5.20261023.2-beta",
     "patch-package": "8.0.1",
     "playwright": "1.64.1",
     "typescript": "7.0.2",
+    "undici": "8.12.3",
     "vite-plus": "1.4.0",
     "vitest": "5.0.5",
     "wrangler": "4.155.0"

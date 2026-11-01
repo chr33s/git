@@ -1,0 +1,29 @@
+diff --git a/node_modules/foldkit/dist/dom/dom.js b/node_modules/foldkit/dist/dom/dom.js
+index d45098d..1e0b361 100644
+--- a/node_modules/foldkit/dist/dom/dom.js
++++ b/node_modules/foldkit/dist/dom/dom.js
+@@ -332,16 +332,14 @@ const findDialogFocusTarget = (dialog, focusSelector) => {
+ const trapFocusWithinDialog = (event, dialog) => {
+     const focusable = focusableElementsWithin(dialog);
+     if (Array.isReadonlyArrayNonEmpty(focusable)) {
+-        const first = Array.headNonEmpty(focusable);
+-        const last = Array.lastNonEmpty(focusable);
+-        if (event.shiftKey && document.activeElement === first) {
+-            event.preventDefault();
+-            last.focus();
+-        }
+-        else if (!event.shiftKey && document.activeElement === last) {
+-            event.preventDefault();
+-            first.focus();
+-        }
++        // Do not delegate intermediate steps to native Tab traversal: WebKit
++        // may skip buttons and leave the modal before reaching our last item.
++        const current = focusable.indexOf(document.activeElement);
++        const next = event.shiftKey
++            ? (current <= 0 ? focusable.length - 1 : current - 1)
++            : (current + 1) % focusable.length;
++        event.preventDefault();
++        focusable[next].focus();
+     }
+     else {
+         event.preventDefault();

@@ -47,10 +47,13 @@
  * it from cache.
  */
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { build } from "vite-plus/pack";
+import { version } from "./version.ts";
+import { writeReleaseNotices } from "../../tools/release-notices.ts";
 
 const major = Number(process.versions.node.split(".")[0]);
 if (major < 26) {
@@ -60,6 +63,33 @@ if (major < 26) {
 
 const out = path.join("dist", "sea");
 fs.mkdirSync(out, { recursive: true });
+
+// Recorded before compilation; a dirty tree is never represented as the commit.
+const revision = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+const dirty =
+  execFileSync("git", ["status", "--porcelain", "--untracked-files=normal"], {
+    encoding: "utf8",
+  }).length > 0;
+const buildInfo = path.join(out, "build-info.json");
+fs.writeFileSync(
+  buildInfo,
+  `${JSON.stringify(
+    {
+      schemaVersion: 1,
+      version,
+      revision,
+      dirty,
+      node: process.versions.node,
+      platform: process.platform,
+      arch: process.arch,
+      packageLockSha256: createHash("sha256")
+        .update(fs.readFileSync("package-lock.json"))
+        .digest("hex"),
+    },
+    null,
+    2,
+  )}\n`,
+);
 
 await build({
   entry: ["src/cli/sea.ts"],
@@ -71,6 +101,9 @@ await build({
   fixedExtension: true,
   hash: false,
   minify: true,
+  // Retained only in the build directory for the dependency/license inventory.
+  // Source maps are not embedded in the standalone executable.
+  sourcemap: true,
   // A SEA must contain every runtime dependency; it cannot load
   // `node_modules` after Node has embedded the bundle.
   deps: { alwaysBundle: /.*/, onlyBundle: false },
@@ -84,6 +117,8 @@ await build({
   outputOptions: { entryFileNames: "main.mjs", codeSplitting: false },
 });
 
+writeReleaseNotices();
+
 const executable = path.join(out, process.platform === "win32" ? "git+.exe" : "git+");
 const configuration = path.join(out, "sea.json");
 fs.writeFileSync(
@@ -95,15 +130,21 @@ fs.writeFileSync(
       output: executable,
       disableExperimentalSEAWarning: true,
       useCodeCache: true,
-      assets: Object.fromEntries(
-        fs
-          .readdirSync("dist/ui", { recursive: true, withFileTypes: true })
-          .filter((entry) => entry.isFile() && !entry.name.endsWith(".map"))
-          .map((entry) => {
-            const file = path.join(entry.parentPath, entry.name);
-            return [`ui/${path.relative("dist/ui", file).split(path.sep).join("/")}`, file];
-          }),
-      ),
+      assets: {
+        "build-info.json": buildInfo,
+        LICENSE: path.join(out, "LICENSE"),
+        "THIRD_PARTY_NOTICES.txt": path.join(out, "THIRD_PARTY_NOTICES.txt"),
+        "dependency-inventory.json": path.join(out, "dependency-inventory.json"),
+        ...Object.fromEntries(
+          fs
+            .readdirSync("dist/ui", { recursive: true, withFileTypes: true })
+            .filter((entry) => entry.isFile() && !entry.name.endsWith(".map"))
+            .map((entry) => {
+              const file = path.join(entry.parentPath, entry.name);
+              return [`ui/${path.relative("dist/ui", file).split(path.sep).join("/")}`, file];
+            }),
+        ),
+      },
     },
     null,
     2,
@@ -116,4 +157,18 @@ execFileSync(process.execPath, ["--build-sea", configuration], { stdio: "inherit
 if (process.platform === "darwin") {
   execFileSync("codesign", ["--sign", "-", executable], { stdio: "inherit" });
 }
+const helper = path.join(
+  out,
+  process.platform === "win32" ? "git-remote-git+id.exe" : "git-remote-git+id",
+);
+fs.rmSync(helper, { force: true });
+if (process.platform === "win32") fs.copyFileSync(executable, helper);
+else fs.symlinkSync("git+", helper);
+// Hash the final signed executable, not the pre-signing SEA output.
+const checksum = createHash("sha256");
+for await (const chunk of fs.createReadStream(executable)) checksum.update(chunk);
+fs.writeFileSync(
+  path.join(out, "SHA256SUMS"),
+  `${checksum.digest("hex")}  ${path.basename(executable)}\n`,
+);
 console.log(`${executable} (${(fs.statSync(executable).size / 1024 / 1024).toFixed(0)} MiB)`);

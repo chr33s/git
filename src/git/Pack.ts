@@ -25,7 +25,7 @@
 import { Context, Effect, Layer, Option, Result, Schema, Stream } from "effect";
 
 import { type ObjectNotFound, PackCorrupt, type StorageFailure } from "./Error.ts";
-import { bytesToHex, concatBytes as concat, hashObject } from "./Format.ts";
+import { bytesToHex, concatBytes as concat, EMPTY_TREE_OID, hashObject } from "./Format.ts";
 import { type ByteSource, inflate as zlibInflate, InflateError } from "./Inflate.ts";
 import { bufferSource, readAt } from "./PackFile.ts";
 import { buildPackIndex, crc32, type PackIndexEntry } from "./PackIndex.ts";
@@ -95,6 +95,42 @@ export const MAX_OBJECT_BYTES = 32 * 1024 * 1024;
 export class MaxObject extends Context.Service<MaxObject, number>()("git/MaxObject") {}
 
 export const maxObject = (bytes: number): Layer.Layer<MaxObject> => Layer.succeed(MaxObject)(bytes);
+
+/** Aggregate import limits, including duplicate objects and expanded delta targets. */
+export interface ImportLimits {
+  readonly objects: number;
+  readonly expandedBytes: number;
+}
+
+export const defaultImportLimits: ImportLimits = {
+  objects: 100_000,
+  expandedBytes: 512 * 1024 * 1024,
+};
+
+export class ImportBudget extends Context.Service<ImportBudget, ImportLimits>()(
+  "git/ImportBudget",
+) {}
+
+const importLimits = Effect.serviceOption(ImportBudget).pipe(
+  Effect.map((limits) => Option.getOrElse(limits, () => defaultImportLimits)),
+);
+
+const importBudget = Effect.fnUntraced(function* (count: number) {
+  const limits = yield* importLimits;
+  if (count > limits.objects) {
+    return yield* new PackCorrupt({
+      reason: `pack declares ${count} objects, limit ${limits.objects}`,
+    });
+  }
+  let remaining = limits.expandedBytes;
+  return (bytes: number): PackCorrupt | null => {
+    if (bytes > remaining) {
+      return new PackCorrupt({ reason: `pack expanded bytes exceed ${limits.expandedBytes}` });
+    }
+    remaining -= bytes;
+    return null;
+  };
+});
 
 const ceilingOf = Effect.fnUntraced(function* () {
   return Option.getOrElse(yield* Effect.serviceOption(MaxObject), () => MAX_OBJECT_BYTES);
@@ -647,6 +683,7 @@ export const unpack = Effect.fn("Pack.unpack")(function* <E>(input: Stream.Strea
     });
 
   const count = yield* step(() => source.header());
+  const charge = yield* importBudget(count);
   const ceiling = yield* ceilingOf();
   /** Object boundaries seen so far, for resolving ofs-delta bases. */
   const oidAt = new Map<number, Oid>();
@@ -661,6 +698,8 @@ export const unpack = Effect.fn("Pack.unpack")(function* <E>(input: Stream.Strea
     // comparison happens once the bomb is already resident; see `MaxObject`.
     const refusal = oversized(index, header.size, ceiling, start);
     if (refusal !== null) return yield* refusal;
+    const expansion = charge(header.size);
+    if (expansion !== null) return yield* expansion;
     const data = yield* step(() => source.inflate(header.size + 1));
     if (data.length !== header.size) {
       return yield* new PackCorrupt({
@@ -676,6 +715,8 @@ export const unpack = Effect.fn("Pack.unpack")(function* <E>(input: Stream.Strea
       const target = deltaTarget(data);
       const outgrown = target === null ? null : oversized(index, target, ceiling, start);
       if (outgrown !== null) return yield* outgrown;
+      const expanded = target === null ? null : charge(target);
+      if (expanded !== null) return yield* expanded;
       const baseOid = header.kind === "ref" ? header.base : oidAt.get(start - header.distance);
       if (baseOid === undefined) {
         return yield* new PackCorrupt({
@@ -746,13 +787,37 @@ export const ingest = Effect.fn("Pack.ingest")(function* <E>(
 ) {
   const atLeast = options?.retainAtLeast ?? RETAIN_AT_LEAST;
   const upTo = options?.retainUpTo ?? RETAIN_UP_TO;
+  const limits = yield* importLimits;
 
   // Buffer up to the cap. The iterator is held so that a pack too large
   // to retain continues, un-rewound, into the streaming path below.
   const iterator = Stream.toAsyncIterable(input)[Symbol.asyncIterator]();
   const buffered: Uint8Array[] = [];
+  // Coalesce small transport chunks: a byte ceiling alone does not bound an
+  // array containing millions of one-byte Uint8Array objects.
+  let pending = new Uint8Array(64 * 1024);
+  let pendingBytes = 0;
+  const buffer = (chunk: Uint8Array) => {
+    for (let at = 0; at < chunk.length;) {
+      if (pendingBytes === 0 && chunk.length - at >= pending.length) {
+        buffered.push(chunk.subarray(at));
+        return;
+      }
+      const take = Math.min(pending.length - pendingBytes, chunk.length - at);
+      pending.set(chunk.subarray(at, at + take), pendingBytes);
+      at += take;
+      pendingBytes += take;
+      if (pendingBytes === pending.length) {
+        buffered.push(pending);
+        pending = new Uint8Array(64 * 1024);
+        pendingBytes = 0;
+      }
+    }
+  };
   let total = 0;
   let ended = false;
+  const header = new Uint8Array(12);
+  let headerBytes = 0;
   yield* Effect.tryPromise({
     try: async () => {
       while (total <= upTo) {
@@ -761,12 +826,23 @@ export const ingest = Effect.fn("Pack.ingest")(function* <E>(
           ended = true;
           return;
         }
-        buffered.push(next.value);
+        if (headerBytes < header.length) {
+          const take = Math.min(header.length - headerBytes, next.value.length);
+          header.set(next.value.subarray(0, take), headerBytes);
+          headerBytes += take;
+          if (headerBytes === header.length && readU32(header, 8) > limits.objects) {
+            throw new PackCorrupt({
+              reason: `pack declares ${readU32(header, 8)} objects, limit ${limits.objects}`,
+            });
+          }
+        }
+        buffer(next.value);
         total += next.value.length;
       }
     },
     catch: asCorrupt,
   });
+  if (pendingBytes > 0) buffered.push(pending.subarray(0, pendingBytes));
 
   if (!ended) {
     // Too large to hold: replay what was buffered, then the live tail.
@@ -828,6 +904,7 @@ const retain = (
     const step = <A>(run: () => Promise<A>) => Effect.tryPromise({ try: run, catch: asCorrupt });
 
     const declared = yield* step(() => source.header());
+    const charge = yield* importBudget(declared);
     const ceiling = yield* ceilingOf();
     const starts: number[] = [];
     for (let index = 0; index < declared; index++) {
@@ -839,6 +916,8 @@ const retain = (
       // many megabytes of declared object.
       const refusal = oversized(index, header.size, ceiling, start);
       if (refusal !== null) return yield* refusal;
+      const expansion = charge(header.size);
+      if (expansion !== null) return yield* expansion;
       const data = yield* step(() => source.inflate(header.size + 1));
       if (data.length !== header.size) {
         return yield* new PackCorrupt({
@@ -850,6 +929,8 @@ const retain = (
         const target = deltaTarget(data);
         const outgrown = target === null ? null : oversized(index, target, ceiling, start);
         if (outgrown !== null) return yield* outgrown;
+        const expanded = target === null ? null : charge(target);
+        if (expanded !== null) return yield* expanded;
       }
     }
     const trailer = yield* step(() => source.trailer());
@@ -1079,6 +1160,13 @@ const encodePack = Effect.fn("Pack.pack")(function* (
   const objects = Stream.fromIterable(oids).pipe(
     Stream.mapEffect((oid) =>
       store.read(oid).pipe(
+        // Repository commits can name Git's virtual empty tree without a
+        // loose object. A receiving Git still needs that object in the pack.
+        Effect.catchTag("ObjectNotFound", (error) =>
+          oid === EMPTY_TREE_OID
+            ? Effect.succeed<RawObject>({ type: "tree", data: new Uint8Array() })
+            : Effect.fail(error),
+        ),
         Effect.flatMap((object) =>
           Effect.promise(async () => {
             const { bytes, depth } = await spell(object);

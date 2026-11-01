@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-01",
+  "kind": "backup-rpc-receipt-validation",
+  "platform": "darwin-arm64",
+  "sourceSha256": {
+    "tools/cloudflare-object-archive.ts": "a562eb39a2f2fb1e3eee7d004b101a5c34bd32f943bc0e7acecd805bda149d20",
+    "tools/cloudflare-namespace-restore.ts": "1b30e4617b4286a6f55526e69063f1b4fb76304f41f99fa5e5c7c5d168cc7523",
+    "src/host/BackupCodec.test.ts": "3783a1102dcdb5f41212afb11321262bc507707ee2e4a926b6fa756ebaec0354",
+    "src/host/BackupRecovery.interop.test.ts": "74826aca73289313411f9433f315b43bf6964d25b03428f9ef8e7b0da81d2a31"
+  },
+  "tests": {
+    "node24.12.0": {
+      "files": 2,
+      "passed": 3,
+      "skipped": 0,
+      "strictReporter": true,
+      "logSha256": "f6ba5abc0ea3ee56852ed89402ddf6e59512c4aa453421eea2bcc83693f86180"
+    },
+    "node26.10.0": {
+      "files": 2,
+      "passed": 3,
+      "skipped": 0,
+      "strictReporter": true,
+      "logSha256": "9dc94b887651605afa5618f992a2001a0d2ba82e385c221afd8685218ae4ab7a"
+    }
+  },
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "462a99f981e7290382deace0ef213eec47f474eaf8107dfb8dd4616116893d99"
+  },
+  "coverage": [
+    "Capture and restore reject empty, released and draining Hold acknowledgements before any subsequent RPC; failed capture writes no packet.",
+    "Apply receipts with wrong source identity or wrong packet digest stop before another Apply while target stays fenced.",
+    "Start receipts with mismatched plan identity stop before replay.",
+    "Finish receipts with mismatched plan, incomplete phase, wrong inventory or wrong signed-seal digest are rejected.",
+    "Namespace restore rejects wrong-source Start receipt before all R2 writes.",
+    "Existing successful native archive capture, interrupted restore, source/target release and stock-Git recovery tests continue to pass."
+  ],
+  "limits": [
+    "Local emulator and programmatic clients; configured remote operator transport and deployed account qualification remain open.",
+    "Receipt validation does not independently prove the remote binding targets the configured account/namespace.",
+    "Global isolation and complete production backup/recovery policy remain required."
+  ]
+}

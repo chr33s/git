@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-30",
+  "kind": "rebuilt-standalone-rehearsal",
+  "build": {
+    "schemaVersion": 1,
+    "version": "0.1.1",
+    "revision": "54c6199b79d3b121ad7964ac8d0edaeba85b4666",
+    "dirty": true,
+    "node": "26.10.0",
+    "platform": "darwin",
+    "arch": "arm64",
+    "packageLockSha256": "abc883138a0ffb07b6f9b96f65fe1304f23b30b616aa68e32e2ff99087bdbcbe"
+  },
+  "sourceFingerprint": {
+    "files": 680,
+    "sha256": "29460f05cf6051eaa692fd5a9da575cdbbcef390a34bd02d7e05184da8a52847",
+    "selection": "git ls-files --cached --others --exclude-standard -- src tools patches package.json package-lock.json tsconfig.json vite.config.ts .github; unique sorted paths, path NUL contents NUL",
+    "unchangedAcrossTests": true
+  },
+  "executable": {
+    "path": "dist/sea/git+",
+    "bytes": 163310672,
+    "sha256": "9f05861289d3e2949a9cc4ca4a69a39730e04d996fc5bc416b2faaec08806aae",
+    "unchangedAcrossTests": true,
+    "macOsAdHocSignatureVerified": true
+  },
+  "archive": {
+    "path": "dist/releases/recovery-myzeDM/git-plus-0.1.1-darwin-arm64-rehearsal.tar.gz",
+    "bytes": 48286600,
+    "sha256": "866d8936491022c3046e10786946b8ddce88fa71e0b45e7649697e9ef31d1eea",
+    "checksumVerified": true,
+    "kind": "rehearsal"
+  },
+  "buildLogSha256": "3cd175afa92a277e484c7fe93dc1c31129ea84321370be4d5710d712f1089e42",
+  "packageLogSha256": "a1f7973e0be18d7dfe9eaae90d8fc7a40907d0e5217aac97dba5501920cca021",
+  "prerequisiteLogSha256": "016b4abe7e86b60c226d0d03c33ad371c742f9e705cc6ae9a084469587ba875a",
+  "testSelection": "Tests containing explicit dist/sea path references, run in unit and interop projects with strict release reporter.",
+  "testFiles": [
+    "src/cli/Diff.interop.test.ts",
+    "src/cli/GitCompat.paths.interop.test.ts",
+    "src/cli/ReleaseArchive.interop.test.ts",
+    "src/cli/ReleaseArtifact.interop.test.ts",
+    "src/cli/ReleaseNotices.interop.test.ts",
+    "src/cli/Sea.interop.test.ts",
+    "src/cli/SeaServer.interop.test.ts",
+    "src/cli/Serve.cancel.interop.test.ts",
+    "src/cli/Serve.repository.interop.test.ts",
+    "src/cli/ServeConfig.interop.test.ts",
+    "src/cli/Work.regression.test.ts",
+    "src/git/Checkout.merge.interop.test.ts",
+    "src/git/Checkout.obstruction.interop.test.ts",
+    "src/git/Commit.merge.interop.test.ts",
+    "src/git/Filemode.interop.test.ts",
+    "src/git/Gitlink.checkout.interop.test.ts",
+    "src/git/Gitlink.interop.test.ts",
+    "src/git/Ignore.config.interop.test.ts",
+    "src/git/Ignore.interop.test.ts",
+    "src/git/Index.lock.interop.test.ts",
+    "src/git/Status.conflict.interop.test.ts"
+  ],
+  "results": [
+    {
+      "testDriverNode": "26.10.0",
+      "embeddedNode": "26.10.0",
+      "files": 21,
+      "passed": 285,
+      "skipped": 0,
+      "durationSeconds": 121.36,
+      "logSha256": "d4d973f464c45ec581cbd90e6b6b6780c98e70465380ddd46a7cb62b77b747a7"
+    },
+    {
+      "testDriverNode": "24.12.0",
+      "embeddedNode": "26.10.0",
+      "files": 21,
+      "passed": 285,
+      "skipped": 0,
+      "durationSeconds": 128.11,
+      "logSha256": "4196dc123b11bb2f6516c8b5c6858f2e7464bf7f4a60c707493a8c14a38e7a5d"
+    }
+  ],
+  "coverage": [
+    "Rebuilt CLI with current UI, helper dispatch, build metadata, licenses and dependency inventory.",
+    "Exact packaged bytes verified after extraction, including embedded metadata and notice parity.",
+    "Installed helper clone/push/fetch and standalone HTTP serving without Node or a source checkout.",
+    "Standalone Git compatibility, index locks, merge/conflict, filemode, ignore and submodule transitions.",
+    "Publication gate and notice tamper regressions remain enforced."
+  ],
+  "limits": [
+    "Dirty worktree explicitly marked as rehearsal; not a tagged release artifact.",
+    "macOS arm64 only, with ad-hoc signing; distribution signing/notarization and chosen platform matrix remain open.",
+    "Both test drivers execute the same Node 26.10.0 standalone binary.",
+    "Archive stored locally only; no publication or remote CI occurred."
+  ]
+}

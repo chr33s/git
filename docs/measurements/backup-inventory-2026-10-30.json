@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-30",
+  "kind": "signed-backup-inventory",
+  "sourceSha256": {
+    "tools/cloudflare-backup-inventory.ts": "ddd8386bdee1b23ccba944450e6786d09d39fb02f16adc0f1757c337a68b60dd",
+    "tools/cloudflare-backup-auth.ts": "635276f419ee905f61f79002ed5dd841adbde9a8b1f8b2a1ccfedd211c30c76c",
+    "tools/copy-r2-backup.ts": "4f4b90b747f087ec0f711102b1a8aca90c3906cc47e5c78eee6c1e8691e4f48d",
+    "src/host/BackupInventory.test.ts": "26d660458e7bd2d5fd9c17bc6d7942a3a85fb6cf82b14a1e3962a725611cf1b4",
+    "src/host/BackupAuthentication.test.ts": "369a5391858d8bba4235d34620c4dec1d9e5dfaef385fd05286e30e87cba4b9e",
+    "src/host/BackupCodec.test.ts": "44717eb4220341817a50a20f2228904993ea07159c2f54f8c1cd77158942731a",
+    "src/host/R2Backup.test.ts": "1b3912fb718526746aa769a071c5adfb70b9a705680236dfd84c16208d956339"
+  },
+  "tests": {
+    "node24.12.0": {
+      "passed": 8,
+      "files": 4,
+      "logSha256": "b395b1d2a848451d66194d7c20187c50327298c215c519c62216805c8f38b4d2"
+    },
+    "node26.10.0": {
+      "passed": 8,
+      "files": 4,
+      "logSha256": "9480de2ba767c95cf966e93ee4efaba3052236b96eb0378e9912cd79654ba2b2"
+    }
+  },
+  "repositoryCheck": "passed",
+  "coverage": [
+    "Ordered constant-space authenticated frame chain and signed completion summary.",
+    "Omitted, repeated, reordered, cross-snapshot frames and altered resource evidence reject completion.",
+    "Native application SQL/KV/R2 import verifies signed frames and summary before finalization.",
+    "R2 report v2 binds canonical HTTP/custom metadata and storage class separately from content.",
+    "Metadata-only mutation preserves content digest but changes metadata digest."
+  ],
+  "limits": [
+    "Native fixture coordinator only; no exposed production management service.",
+    "Inventory progress is not yet durably coordinated with production imports.",
+    "Independent resource evidence and complete namespace enumeration remain operator/coordinator responsibilities.",
+    "No encryption or deployed account qualification."
+  ]
+}

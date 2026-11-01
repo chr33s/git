@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-30",
+  "kind": "namespace-recovery-stock-git",
+  "git": "git version 2.56.0",
+  "sourceSha256": {
+    "src/host/BackupRecovery.interop.test.ts": "3b5ac51ef8d7f8b2404a516eeaa73849c4dffef0ee5ae05fd4ba4d16530a9112",
+    "src/host/BackupCodec.test.ts": "57004f105a0f8c05057893b59a90917c7150804d50de12dccdf80610eeeb46c6",
+    "src/testing/BackupRuntime.ts": "b47da53f211a21d333c371bb08c5b4b6e08295f64879fa96cf2d0852d062667c",
+    "src/testing/BackupApplication.worker.ts": "ca02796772634995da34475d58ffb663d7713196edbdf0306c7f3d04510feae1",
+    "src/testing/BackupArtifacts.worker.ts": "1c13fc37229b991d60f76ee1974d603aaf1aa5ea4ffcb6dc99c022936e9e3d51",
+    "tools/cloudflare-namespace-archive.ts": "081fa699f4ef754c9dc79dae8b31df44a52731cf8285dbf46cf0dc158ae8169b",
+    "tools/cloudflare-namespace-restore.ts": "330bcb21da96d5f42d611c6a1268c01bf08c8514fa186130877b2d689dbf5f92",
+    "tools/cloudflare-namespace-release.ts": "a268d76daa262a7f0402ae505390005002c83a2f6eb5a39edcd47634e99fec27"
+  },
+  "tests": {
+    "node24.12.0": {
+      "files": 2,
+      "passed": 3,
+      "skipped": 0,
+      "strictReporter": true,
+      "logSha256": "4b8d512c81e76fd242d47856066ab3d848d9010c96ae8b6e0738fa0dde8a3b77"
+    },
+    "node26.10.0": {
+      "files": 2,
+      "passed": 3,
+      "skipped": 0,
+      "strictReporter": true,
+      "logSha256": "ccccefd922ee2607c5e7ccd5c63faa8283588ce4c205d75019c1fcb881117fea"
+    }
+  },
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "9d3ae4ba39da666b402641ebb73f656aea1b450db8c5b24739836e66baf1998b"
+  },
+  "coverage": [
+    "Capture and restore two native Durable Objects plus shared R2 through signed namespace archives and a durable journal.",
+    "Application/LFS and authorization/registry state compares equal after restored object eviction.",
+    "Restored pack/index and raw loose R2 objects stream to temporary files; Git independently hashes loose objects.",
+    "Git verify-pack, strict full fsck, refs/HEAD, shallow-state and exact object-byte comparisons pass.",
+    "Stock Git clones the reconstructed recovered repository and fsck passes on the clone.",
+    "Both targets stay fenced through verification; explicit release binds the verification-report digest and preserves source fences.",
+    "Existing native fault/resume tests pass after shared runtime extraction."
+  ],
+  "limits": [
+    "Small native local fixture with a shallow root commit, one pack/index pair and a retained loose empty tree.",
+    "The stock-Git clone reads a reconstructed filesystem repository, not the deployed Cloudflare HTTP host.",
+    "No complete hub/fork behavioral recovery, production-scale qualification or installation-wide isolation proof.",
+    "Cloudflare account deployment and production recovery targets remain open."
+  ]
+}

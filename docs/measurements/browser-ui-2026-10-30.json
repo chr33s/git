@@ -1,0 +1,144 @@
+{
+  "date": "2026-10-30",
+  "platform": "darwin",
+  "architecture": "arm64",
+  "node": "26.10.0",
+  "git": "git version 2.56.0",
+  "sourceState": "current uncommitted worktree; not a tagged release artifact",
+  "results": [
+    {
+      "engine": "chromium",
+      "browserVersion": "156.0.8078.4",
+      "revision": "1248",
+      "passedChecks": 207,
+      "failedChecks": 0,
+      "command": "node src/ui/verify.ts --browser chromium"
+    },
+    {
+      "engine": "firefox",
+      "browserVersion": "157.0",
+      "revision": "1555",
+      "passedChecks": 207,
+      "failedChecks": 0,
+      "command": "node src/ui/verify.ts --browser firefox"
+    },
+    {
+      "engine": "webkit",
+      "browserVersion": "27.2",
+      "revision": "2370",
+      "passedChecks": 207,
+      "failedChecks": 0,
+      "command": "node src/ui/verify.ts --browser webkit"
+    }
+  ],
+  "entrySha256": "924aa716796ad27e825e821bd959f9a9b706b98d523b7c9d98a7fb489313db62",
+  "patch": {
+    "file": "patches/foldkit+0.169.0.patch",
+    "sha256": "086ae8b03ea1e58df65d22cc7a085946bf5ae98221c2bff00762fcde7803af39"
+  },
+  "coverage": [
+    "rendering and navigation",
+    "API-backed editing",
+    "OPFS clone, commit, reload and push",
+    "signed hub tasks, proposals, reviews, merge and policy",
+    "modal forward/backward tab containment and Escape focus restoration",
+    "production UI and development UI entry points",
+    "same-origin development HMR handshake",
+    "stock Git fsck --strict over browser-written repository and hub history"
+  ],
+  "isolation": "temporary on-disk profiles and dynamically allocated local HTTP origin ports",
+  "observations": [
+    "WebKit reused OPFS at a fixed origin across separate temporary profile directories; a fresh profile directory alone was insufficient isolation on this host.",
+    "The Foldkit patch fixes intermediate Tab traversal escaping a modal in WebKit.",
+    "The development server explicitly binds its WebSocket to its HTTP server to prevent use of the shared default HMR port."
+  ],
+  "limitations": [
+    "macOS arm64 only",
+    "Pinned Playwright builds, not all stable branded browser versions",
+    "No production browser support decision",
+    "No actual browser-managed eviction or real quota exhaustion qualification",
+    "No deployed Cloudflare browser qualification",
+    "Entry hash is not a complete release artifact manifest"
+  ],
+  "node24Qualification": {
+    "node": "24.12.0",
+    "buildCommand": "npm exec --yes --package=node@24.12.0 -- node node_modules/vite-plus/bin/vp build",
+    "entrySha256": "924aa716796ad27e825e821bd959f9a9b706b98d523b7c9d98a7fb489313db62",
+    "results": [
+      {
+        "engine": "chromium",
+        "browserVersion": "156.0.8078.4",
+        "revision": "1248",
+        "passedChecks": 207,
+        "failedChecks": 0,
+        "command": "npm exec --yes --package=node@24.12.0 -- node src/ui/verify.ts --browser chromium"
+      },
+      {
+        "engine": "firefox",
+        "browserVersion": "157.0",
+        "revision": "1555",
+        "passedChecks": 207,
+        "failedChecks": 0,
+        "command": "npm exec --yes --package=node@24.12.0 -- node src/ui/verify.ts --browser firefox"
+      },
+      {
+        "engine": "webkit",
+        "browserVersion": "27.2",
+        "revision": "2370",
+        "passedChecks": 207,
+        "failedChecks": 0,
+        "command": "npm exec --yes --package=node@24.12.0 -- node src/ui/verify.ts --browser webkit"
+      }
+    ]
+  },
+  "ciIdentityCommandRehearsal": [
+    {
+      "node": "24.12.0",
+      "engine": "chromium",
+      "passed": 10,
+      "skipped": 0,
+      "reporter": "tools/release-test-reporter.ts"
+    },
+    {
+      "node": "24.12.0",
+      "engine": "firefox",
+      "passed": 10,
+      "skipped": 0,
+      "reporter": "tools/release-test-reporter.ts"
+    },
+    {
+      "node": "24.12.0",
+      "engine": "webkit",
+      "passed": 10,
+      "skipped": 0,
+      "reporter": "tools/release-test-reporter.ts"
+    },
+    {
+      "node": "26.10.0",
+      "engine": "chromium",
+      "passed": 10,
+      "skipped": 0,
+      "reporter": "tools/release-test-reporter.ts"
+    },
+    {
+      "node": "26.10.0",
+      "engine": "firefox",
+      "passed": 10,
+      "skipped": 0,
+      "reporter": "tools/release-test-reporter.ts"
+    },
+    {
+      "node": "26.10.0",
+      "engine": "webkit",
+      "passed": 10,
+      "skipped": 0,
+      "reporter": "tools/release-test-reporter.ts"
+    }
+  ],
+  "workflowValidation": {
+    "path": ".github/workflows/ci.yml",
+    "validator": "actionlint",
+    "result": "passed",
+    "remoteMatrixExecuted": false
+  }
+}

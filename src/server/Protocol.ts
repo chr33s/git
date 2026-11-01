@@ -17,10 +17,20 @@
  * writer emits full objects) and plain `multi_ack`, which `_detailed`
  * supersedes.
  */
+import * as TraversalBudget from "../git/TraversalBudget.ts";
 import { concatBytes as concat } from "../git/Format.ts";
 import { Effect, Option, Schema, Stream } from "effect";
 
-import { type GitError, Invalid, PackCorrupt, type StorageFailure } from "../git/Error.ts";
+import {
+  type GitError,
+  Invalid,
+  PackCorrupt,
+  RequestLimitExceeded,
+  type StorageFailure,
+} from "../git/Error.ts";
+import * as RequestBody from "./RequestBody.ts";
+import * as RequestLimits from "./RequestLimits.ts";
+import { ImportBudget } from "../git/Pack.ts";
 import { bandChunks, DELIM, FLUSH, pkt, PktReader } from "../git/Pkt.ts";
 import { type ReceiveResult, Repository } from "../git/Repository.ts";
 import * as Refspec from "../git/Refspec.ts";
@@ -39,9 +49,8 @@ const AGENT = "agent=chr33s-git/0";
  * The most pack an unauthenticated inbox submission may persist.
  *
  * Generous for the thing an inbox is for — a patch series, with whatever
- * history it needs to apply — and small next to what a member pushes, which
- * this deliberately does not bound: a member's writes are already answerable
- * to the trust log, and capping them would break the first large import.
+ * history it needs to apply. Member pushes have the separately configurable
+ * aggregate receive budget; anonymous proposals keep this stricter ceiling.
  */
 const MAX_INBOX_PACK = 32 * 1024 * 1024;
 
@@ -68,33 +77,41 @@ export const planFor = Effect.fn("Protocol.planFor")(function* (request: {
   readonly since: Date | undefined;
   readonly notRefs: ReadonlyArray<string>;
 }) {
-  const repository = yield* Repository;
+  const limits = yield* RequestLimits.current;
+  return yield* Effect.gen(function* () {
+    const repository = yield* Repository;
 
-  // A deepening fetch assembles its object set without reading blobs, so it
-  // cannot notice a redacted one and would succeed with it in the plan — and
-  // the failure would then land in `packOids`, after the 200 and the
-  // boundary lines had gone out. There is nothing to retry from there, so
-  // that path pays for the exclusion up front. It is also the rare one:
-  // ordinary clones and fetches take the strict walk below and pay nothing.
-  const deepening =
-    request.depth !== undefined || request.since !== undefined || request.notRefs.length > 0;
-  if (deepening) {
-    // Not swallowed. An exclusion this could not compute is an exclusion the
-    // plan does not have, and the request would then fail inside `packOids`
-    // — after the 200 and the boundary lines — which is precisely the
-    // outcome computing it up front exists to avoid.
+    // A deepening fetch assembles its object set without reading blobs, so it
+    // cannot notice a redacted one and would succeed with it in the plan — and
+    // the failure would then land in `packOids`, after the 200 and the
+    // boundary lines had gone out. There is nothing to retry from there, so
+    // that path pays for the exclusion up front. It is also the rare one:
+    // ordinary clones and fetches take the strict walk below and pay nothing.
+    const deepening =
+      request.depth !== undefined || request.since !== undefined || request.notRefs.length > 0;
+    if (deepening) {
+      // Not swallowed. An exclusion this could not compute is an exclusion the
+      // plan does not have, and the request would then fail inside `packOids`
+      // — after the 200 and the boundary lines — which is precisely the
+      // outcome computing it up front exists to avoid.
+      return yield* repository.fetch({ ...request, exclude: yield* missing() });
+    }
+
+    // Only a *missing object* is worth a second look; a storage fault is not
+    // something tombstones explain, and retrying it would pay for a trust fold
+    // to fail the same way twice.
+    const plan = yield* repository
+      .fetch(request)
+      .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
+    if (plan !== null) return plan;
+
     return yield* repository.fetch({ ...request, exclude: yield* missing() });
-  }
-
-  // Only a *missing object* is worth a second look; a storage fault is not
-  // something tombstones explain, and retrying it would pay for a trust fold
-  // to fail the same way twice.
-  const plan = yield* repository
-    .fetch(request)
-    .pipe(Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)));
-  if (plan !== null) return plan;
-
-  return yield* repository.fetch({ ...request, exclude: yield* missing() });
+  }).pipe(
+    Effect.provideService(
+      TraversalBudget.TraversalBudget,
+      TraversalBudget.make(limits.fetchGraphSteps),
+    ),
+  );
 });
 
 /**
@@ -113,38 +130,6 @@ const missing = Redaction.absent;
 const text = (payload: Uint8Array): string => {
   const decoded = decoder.decode(payload);
   return decoded.endsWith("\n") ? decoded.slice(0, -1) : decoded;
-};
-
-/**
- * The request body as chunks. git compresses large negotiation bodies, and
- * announces it the standard way; a pack body is already deflated per object,
- * so pushes arrive identity-encoded.
- *
- * Gzip is `DecompressionStream`, which workerd and node both implement.
- * `node:zlib` cannot be imported here: this module is the Worker handler.
- * The reader pulls one chunk at a time. Draining the transform first is not
- * backpressure — deflate reaches about 1000:1, so one 64 KiB chunk becomes
- * ~64 MiB and a few of them exhaust a 128 MiB Durable Object. A rejected
- * read is the corrupt-body failure; `step` turns it into `PackCorrupt`.
- */
-const body = (request: Request): AsyncIterable<Uint8Array> => {
-  const raw = request.body;
-  if (raw === null) return (async function* () {})();
-  if (request.headers.get("content-encoding")?.includes("gzip") !== true) return raw;
-
-  const decoded = raw.pipeThrough(new DecompressionStream("gzip"));
-  return (async function* () {
-    const reader = decoded.getReader();
-    try {
-      for (;;) {
-        const next = await reader.read();
-        if (next.done) return;
-        if (next.value.byteLength > 0) yield next.value;
-      }
-    } finally {
-      reader.releaseLock();
-    }
-  })();
 };
 
 const headers = (type: string) => ({
@@ -251,7 +236,9 @@ const step = <A>(run: () => Promise<A>) =>
   Effect.tryPromise({
     try: run,
     catch: (cause) =>
-      Schema.is(PackCorrupt)(cause) || Schema.is(Invalid)(cause)
+      Schema.is(PackCorrupt)(cause) ||
+      Schema.is(Invalid)(cause) ||
+      Schema.is(RequestLimitExceeded)(cause)
         ? cause
         : corrupt(cause instanceof Error ? cause.message : JSON.stringify(cause)),
   });
@@ -283,12 +270,21 @@ const commonOf = (
 /** `POST /git-upload-pack` — wants and haves in, ACK/NAK and a pack out. */
 export const uploadPack = Effect.fn("Protocol.uploadPack")(function* (request: Request) {
   const repository = yield* Repository;
+  const limits = yield* RequestLimits.current;
+  const input = yield* RequestBody.open(
+    request,
+    limits.negotiationBytes,
+    "negotiation bytes",
+    true,
+  );
 
   // v2 is a different conversation, and the client announces it in a
   // header rather than in the body — so the version is known before a
   // single pkt-line is read.
   if (isVersionTwo(request)) {
-    const parsed = yield* readV2(new PktReader(body(request)));
+    const parsed = yield* readV2(new PktReader(input), limits.negotiationLines);
+    if (parsed.authenticationProbe)
+      return new Response(null, { headers: headers("application/x-git-upload-pack-result") });
     if (parsed.command === "ls-refs") return yield* lsRefs(parsed);
     if (parsed.command === "fetch") return yield* fetchV2(parsed);
     return yield* new Invalid({
@@ -297,7 +293,7 @@ export const uploadPack = Effect.fn("Protocol.uploadPack")(function* (request: R
     });
   }
 
-  const reader = new PktReader(body(request));
+  const reader = new PktReader(input);
 
   const wants: Oid[] = [];
   const haves: Oid[] = [];
@@ -309,11 +305,20 @@ export const uploadPack = Effect.fn("Protocol.uploadPack")(function* (request: R
   let multiAck = false;
   let done = false;
   let first = true;
+  let lines = 0;
+  let initialFlush = false;
 
   yield* step(async () => {
     for (;;) {
       const item = await reader.next();
       if (item === "eof") return;
+      if (++lines > limits.negotiationLines) {
+        throw new RequestLimitExceeded({
+          budget: "negotiation lines",
+          limit: limits.negotiationLines,
+        });
+      }
+      if (lines === 1 && item === "flush") initialFlush = true;
       // v2's separators cannot appear in a v0 body, and treating them as
       // nothing keeps the reader total rather than throwing on a byte
       // sequence this branch simply does not expect.
@@ -367,6 +372,8 @@ export const uploadPack = Effect.fn("Protocol.uploadPack")(function* (request: R
   });
 
   if (wants.length === 0) {
+    if (initialFlush && lines === 1)
+      return new Response(null, { headers: headers("application/x-git-upload-pack-result") });
     return yield* new Invalid({ field: "upload-pack", reason: "no 'want' lines" });
   }
 
@@ -459,23 +466,35 @@ export const uploadPack = Effect.fn("Protocol.uploadPack")(function* (request: R
   return new Response(Stream.toReadableStream(packStream), {
     headers: headers("application/x-git-upload-pack-result"),
   });
-});
+}, Effect.scoped);
 
 /** A v2 request: a command, then capabilities, then `0001`, then arguments. */
 interface V2Request {
+  readonly authenticationProbe: boolean;
   readonly command: string;
   readonly args: ReadonlyArray<string>;
 }
 
-const readV2 = (reader: PktReader) =>
+const readV2 = (reader: PktReader, limit: number) =>
   step(async (): Promise<V2Request> => {
     let command = "";
     const args: string[] = [];
     let afterDelim = false;
+    let lines = 0;
 
     for (;;) {
       const item = await reader.next();
+      if (item === "flush" && lines === 0) {
+        // Git probes HTTP authentication before a chunked RPC. Only the
+        // exact flush-only body is an empty successful exchange.
+        for await (const chunk of reader.rest()) {
+          if (chunk.byteLength > 0)
+            throw new Invalid({ field: "command", reason: "trailing authentication probe bytes" });
+        }
+        return { command, args, authenticationProbe: true };
+      }
       if (item === "eof" || item === "flush") break;
+      if (++lines > limit) throw new RequestLimitExceeded({ budget: "negotiation lines", limit });
       if (item === "delim") {
         afterDelim = true;
         continue;
@@ -487,7 +506,7 @@ const readV2 = (reader: PktReader) =>
       else if (line.startsWith("command=")) command = line.slice(8);
     }
 
-    return { command, args };
+    return { command, args, authenticationProbe: false };
   });
 
 /**
@@ -674,7 +693,9 @@ const report = (results: ReadonlyArray<ReceiveResult>, unpacked: string): Uint8A
 export const receivePack = Effect.fn("Protocol.receivePack")(function* (request: Request) {
   const repository = yield* Repository;
   const who = Option.getOrElse(yield* Effect.serviceOption(Auth.Requester), () => Auth.anonymous);
-  const reader = new PktReader(body(request));
+  const limits = yield* RequestLimits.current;
+  const input = yield* RequestBody.open(request, limits.receiveBytes, "receive-pack bytes", true);
+  const reader = new PktReader(input);
 
   const updates: RefUpdate[] = [];
   const clientShallow: Oid[] = [];
@@ -683,11 +704,31 @@ export const receivePack = Effect.fn("Protocol.receivePack")(function* (request:
   let atomic = false;
   let sideband = false;
   let first = true;
+  let commands = 0;
+  let commandBytes = 0;
+  let flushed = false;
 
   yield* step(async () => {
     for (;;) {
       const item = await reader.next();
-      if (item === "eof" || item === "flush" || item === "delim" || item === "end") return;
+      if (item === "flush") {
+        flushed = true;
+        return;
+      }
+      if (item === "eof" || item === "delim" || item === "end") return;
+      if (++commands > limits.receiveCommands) {
+        throw new RequestLimitExceeded({
+          budget: "receive commands",
+          limit: limits.receiveCommands,
+        });
+      }
+      commandBytes += item.byteLength + 4;
+      if (commandBytes > limits.receiveCommandBytes) {
+        throw new RequestLimitExceeded({
+          budget: "receive command bytes",
+          limit: limits.receiveCommandBytes,
+        });
+      }
       const line = text(item);
 
       // Shallow declarations precede the first command and do not consume
@@ -775,7 +816,15 @@ export const receivePack = Effect.fn("Protocol.receivePack")(function* (request:
   });
 
   if (updates.length === 0 && refused.length === 0) {
-    yield* drain;
+    const trailing = yield* step(async () => {
+      for await (const chunk of reader.rest()) if (chunk.byteLength > 0) return true;
+      return false;
+    });
+    // Stock Git probes authentication with a flush-only POST before sending
+    // a pack larger than http.postBuffer as a chunked request. There is no
+    // ref mutation and no status report for this successful empty exchange.
+    if (flushed && commands === 0 && !trailing)
+      return new Response(null, { headers: headers("application/x-git-receive-pack-result") });
     return yield* new Invalid({ field: "receive-pack", reason: "no commands" });
   }
 
@@ -915,12 +964,17 @@ export const receivePack = Effect.fn("Protocol.receivePack")(function* (request:
   // a ref; a delete-only push sends none, and a push whose creates were all
   // refused above has already had its body drained.
   if (refusal === null && writes.length > 0) {
-    const body = Stream.fromAsyncIterable(reader.rest(), (cause) => corrupt(String(cause)));
+    const body = Stream.fromAsyncIterable(reader.rest(), (cause) =>
+      corrupt(
+        Schema.is(RequestLimitExceeded)(cause)
+          ? `${cause.budget} exceeds ${cause.limit}`
+          : String(cause),
+      ),
+    );
     // An inbox proposal is a patch someone is offering, and it arrives from a
     // caller who has proved nothing. Every other writer is a member the trust
-    // log names, so their pack is bounded by what their membership is worth;
-    // this one is bounded here or not at all, and unbounded meant an anonymous
-    // stranger could persist objects until the store filled. Counted as it
+    // log names, but the aggregate host budget applies to all writers. An
+    // inbox gets this additional lower bound. Counted as it
     // streams, because the length a client *declares* is not what it sends.
     let received = 0;
     const bounded = Auth.inboxOnly(who)
@@ -936,14 +990,18 @@ export const receivePack = Effect.fn("Protocol.receivePack")(function* (request:
         )
       : body;
     const unpacked = yield* repository.unpack(bounded).pipe(
+      Effect.provideService(ImportBudget, {
+        objects: limits.receiveObjects,
+        expandedBytes: limits.receiveExpandedBytes,
+      }),
       Effect.map(() => null),
       Effect.catch((error) => Effect.succeed(error)),
     );
     if (unpacked !== null) {
       const reason = Schema.is(PackCorrupt)(unpacked) ? unpacked.reason : unpacked._tag;
-      // The unpacker stopped part-way, so the rest of the pack is still
-      // arriving; the report only reaches the client if it is read first.
-      yield* drain;
+      // Refuse immediately. Draining here lets a sender hold the repository
+      // gate after its pack has already failed. The request scope cancels
+      // the remaining input before returning the report.
       return respond(allFailed(updates, "unpacker error"), reason);
     }
 
@@ -1035,7 +1093,7 @@ export const receivePack = Effect.fn("Protocol.receivePack")(function* (request:
   );
 
   return respond(results, "ok");
-});
+}, Effect.scoped);
 
 /**
  * Route a request whose repository is already resolved — the caller scoped

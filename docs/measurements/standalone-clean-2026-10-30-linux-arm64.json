@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "measuredAt": "2026-10-30T04:25:02Z",
+  "platform": "Linux-6.8.0-117-generic-aarch64-with-glibc2.36",
+  "arch": "aarch64",
+  "build": {
+    "schemaVersion": 1,
+    "version": "0.1.1",
+    "revision": "54c6199b79d3b121ad7964ac8d0edaeba85b4666",
+    "dirty": true,
+    "node": "26.13.0",
+    "platform": "linux",
+    "arch": "arm64",
+    "packageLockSha256": "5b7a5aa66dccea7f4b67a2e8e4b1f13c9607a388205867a7be3cf564c5fb9a27"
+  },
+  "runtimeImage": "debian@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3",
+  "executableSha256": "ba446cbe71ffdb4bcb41de0681f3814d7f2e602ff057dc8297ba0cf419bce05e",
+  "git": "git version 2.39.5",
+  "nodeAbsent": true,
+  "sourceCheckoutAbsent": true,
+  "installedChecksumsVerified": true,
+  "embeddedUiServed": true,
+  "privateAnonymousReadDenied": true,
+  "identityClonePushFetchVerified": true,
+  "repositoryIdentityPinned": true,
+  "nativeGitFsckPassed": true,
+  "limitsOfEvidence": "Local dirty rehearsal; Debian runtime only, not signed/tagged release or browser rendering."
+}

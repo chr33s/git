@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-01",
+  "kind": "r2-backup-size-preflight",
+  "platform": "darwin-arm64",
+  "sourceSha256": {
+    "tools/copy-r2-backup.ts": "c19d839eddd0b5ea8035a1245c9db19d3a0e11e7f0016c2f6f7a7dcec016f5cf",
+    "src/host/R2Backup.test.ts": "260a17513f8a23d804c88e3e8d550bdde7547781fc2443875e292ecad8780d5a"
+  },
+  "tests": {
+    "node24.12.0": {
+      "recoverySuite": {
+        "files": 6,
+        "passed": 28,
+        "skipped": 0,
+        "logSha256": "c19cb7b404d3f30efbac20fa616f450d5f7f9955104865e5b8f8043c714c625e"
+      },
+      "finalR2TestAfterFixtureTypeFix": {
+        "files": 1,
+        "passed": 1,
+        "skipped": 0,
+        "logSha256": "3f94e33922dfb4dd58128bc9239f2b91a1bcea8ec5db8ba04475a56bac4d5dec"
+      },
+      "strictReporter": true
+    },
+    "node26.10.0": {
+      "recoverySuite": {
+        "files": 6,
+        "passed": 28,
+        "skipped": 0,
+        "logSha256": "90a7e91634594b25f9c9792163118f223015bd07423b132f61efa4a63af2e854"
+      },
+      "finalR2TestAfterFixtureTypeFix": {
+        "files": 1,
+        "passed": 1,
+        "skipped": 0,
+        "logSha256": "dd0909a4b343ef9da073568cf6cac0de9dd4145c32e4b7541677cba6ad5e597e"
+      },
+      "strictReporter": true
+    }
+  },
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "6810d0c143ae71ae3aedce73262f45a9f6aa16f1a09efc4b9f163128440441e0"
+  },
+  "references": [
+    "https://developers.cloudflare.com/r2/objects/upload-objects/",
+    "https://developers.cloudflare.com/r2/api/workers/workers-api-reference/"
+  ],
+  "coverage": [
+    "Copy and restore scan all metadata pages before body reads or destination writes.",
+    "Final-page metadata faults cover 5 GiB plus one byte, negative and fractional sizes, NaN, Infinity and an unsafe integer.",
+    "All metadata-fault cases assert zero GETs and PUTs and an empty destination.",
+    "Transfer rechecks listed and fetched size and retains conditional-create PUT and streamed readback.",
+    "Existing native copy/resume, full namespace recovery and coordinator process-death tests remain passing."
+  ],
+  "limits": [
+    "Metadata fault injection does not demonstrate a real 5 GiB upload.",
+    "Objects above 5 GiB remain unsupported by the conditional single-PUT transfer path; multipart transfer is not implemented.",
+    "Preflight adds a full metadata listing pass and still requires externally isolated writers.",
+    "Production-scale transfer, deployed platform limits and multipart no-overwrite semantics remain open."
+  ]
+}

@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-01",
+  "kind": "backup-operator-command-local-validation",
+  "sourceSha256": {
+    "tools/backup-cloudflare.ts": "14ffc71b0fd14970d6d49228a4ecb6f04f361097a538a59624482f1a1b42efc8",
+    "tools/cloudflare-backup-read.ts": "14ba9e31735701dc635718d93c0bc53982b4d5afff1b0fd2df4425e72bb6e6f7",
+    "tools/copy-r2-backup.ts": "0950bfadd4ec3168db434e42612e0083958fcb9508e06c8fb88c68e8b90bb6fe",
+    "tools/cloudflare-namespace-archive.ts": "f7f26de02bab4256227b43eb0b1643aff9cdbfe6f5f0ea2099fda6387d1fedad",
+    "tools/cloudflare-namespace-restore.ts": "779c420b808b367a7b10f91c569261755e874db74c2a1fb000dd9210e67ca3a0",
+    "tools/cloudflare-source-release.ts": "d9912c213d08b39bf1a6e5de79935ed3d00e5e2340614bca7078d404a83ef09c",
+    "src/host/BackupCommand.test.ts": "25e24d7034333d27560bc699cd87cb1809cec0276f9033b735b17bf6ff7fada5"
+  },
+  "tests": {
+    "node26.10.0": {
+      "files": 4,
+      "passed": 8,
+      "skipped": 0,
+      "strictReporter": true,
+      "logSha256": "24934b44ea0feeaa1692fa0be6699f0d360f2cd1879e8fcb126b36897cda82fd"
+    },
+    "node24.12.0": {
+      "files": 2,
+      "passed": 5,
+      "skipped": 0,
+      "strictReporter": true,
+      "logSha256": "f7e30e1b5a0717dcb30debcbf48dc0f464fcc64a40cc51fce5016ece302bba55"
+    }
+  },
+  "repositoryCheck": {
+    "exitCode": 0,
+    "logSha256": "0a077add0997a451f479e97c6fe900dea7e723505e07492eb955254e3be091d6"
+  },
+  "verified": [
+    "Four explicit commands through runBackupCommand using native workerd DO SQLite, typed KV and nonempty R2",
+    "One scoped connection per unfinished command, disposed after success and injected transport failure",
+    "Source and recovery targets remain fenced until their separate release commands",
+    "SQL, typed KV and R2 payload compared while targets held",
+    "Terminal release retries do not connect and preserve later holds",
+    "Private bounded plan reads; mismatched commands, malformed/oversized plans and symlinks rejected before connection",
+    "Wrong source connection and signer, archive-contained control paths, missing or blank acceptance report rejected before connection",
+    "CLI subprocess failure exits nonzero with no stdout and redacted error"
+  ],
+  "limitations": [
+    "No configured remote Cloudflare account exercised",
+    "Local connector injection does not qualify provider transport or token permissions",
+    "No production RPO/RTO, retention, encryption or custody acceptance",
+    "No nonempty R2 transfer SIGKILL qualification",
+    "Repository CLI not embedded in standalone distributable"
+  ]
+}

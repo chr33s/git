@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-30",
+  "kind": "durable-object-sql-kv-import",
+  "supersedesComponent": "sql-import-session-2026-10-30.json",
+  "sourceSha256": {
+    "tools/cloudflare-object-import.ts": "bcc305de6fdc47c23548fabf7d3f8c2f83202a12172e52c469fc7519a5fd8960",
+    "tools/cloudflare-backup-control.ts": "170b966ee88cb9117a3308da734a390b247452f5cf024854ac879179cb4cce06",
+    "tools/cloudflare-kv-backup.ts": "accf07c339df78fb8bbf4c8ac7873ceb218e31bcbb6f15731242924206a29c7d",
+    "tools/cloudflare-sql-restore.ts": "821b67c174232014cbd843ffe3106d788ffef39f9ef09e8a71be754f56bac648",
+    "tools/cloudflare-backup-inventory.ts": "ddd8386bdee1b23ccba944450e6786d09d39fb02f16adc0f1757c337a68b60dd",
+    "src/host/CloudflareBackupFence.ts": "1d7e4d83ede2d8fea930fea0150e50397740d439785525894fee869ee866fb30",
+    "src/testing/BackupCodec.worker.ts": "1e8408bf37e2a052e2c27e39a52022617c118ae49a56609915391ecc99c7a090",
+    "src/testing/BackupApplication.worker.ts": "ca02796772634995da34475d58ffb663d7713196edbdf0306c7f3d04510feae1",
+    "src/host/BackupCodec.test.ts": "ff349105e750ab1853f332c2d516a886299ff008b27685aa310d96c3017d86c4"
+  },
+  "tests": {
+    "node24.12.0": {
+      "files": 3,
+      "passed": 7,
+      "logSha256": "cfb4d67362145a276c7452e7bde2702928ebb3be4c26b713bc9886d5be7ee8ef"
+    },
+    "node26.10.0": {
+      "files": 3,
+      "passed": 7,
+      "logSha256": "4d4ef273a6d2e107bcace8537efb13ea7f031eb166aa7f21809c5645d735cc2b"
+    }
+  },
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "22445ee8268b922dc6425c5414a50b2235305947aac97a8441d2e4f8e2eb8f07"
+  },
+  "coverage": [
+    "SQL and KV mutations commit atomically with the authenticated inventory checkpoint.",
+    "Native checkpoint faults roll back data and finalization; concurrent and failed-flush retries advance inventory once.",
+    "Eviction preserves progress and completion receipts.",
+    "Reserved control keys, wrong snapshots, unordered keys, absent values, missing terminal KV and extra pages reject.",
+    "Capture excludes a matching held fence and refuses retained checkpoints.",
+    "Empty SQL and KV stores complete with explicit catalog and terminal page.",
+    "Production-service fixture restores SQL, typed KV and copied R2 data through durable authenticated object session and verifies repository, quotas, credentials, snapshots, packs and LFS after eviction."
+  ],
+  "limits": [
+    "Private single-object session; trusted caller must bind plan to actual target identity.",
+    "Whole-installation inventory, capture coordination and completed receipt cleanup remain open.",
+    "Fence covers repository object admission, not all installation writers.",
+    "No deployed-account, public recovery API or whole-installation production qualification."
+  ]
+}

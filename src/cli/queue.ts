@@ -18,7 +18,12 @@
 import { Console, Effect } from "effect";
 import { Argument, Command, Flag } from "effect/cli";
 
-import { Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
+import {
+  Invalid,
+  type ObjectNotFound,
+  type RequestLimitExceeded,
+  type StorageFailure,
+} from "../git/Error.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
@@ -52,8 +57,8 @@ const identityOf = Effect.fn("queue.identityOf")(function* (repo: string) {
  * here would turn it into a queue that silently declines to build.
  */
 const settled = <A, R>(
-  effect: Effect.Effect<A, Invalid | ObjectNotFound | StorageFailure, R>,
-): Effect.Effect<A | Invalid | ObjectNotFound | StorageFailure, never, R> =>
+  effect: Effect.Effect<A, Invalid | ObjectNotFound | RequestLimitExceeded | StorageFailure, R>,
+): Effect.Effect<A | Invalid | ObjectNotFound | StorageFailure, RequestLimitExceeded, R> =>
   effect.pipe(
     Effect.catchTags({
       Invalid: (error) => Effect.succeed(error),

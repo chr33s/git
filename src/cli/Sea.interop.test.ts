@@ -1,19 +1,146 @@
 /** Source and SEA must remain identical at the process boundary. */
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "@effect/vitest";
 
-import { hasGit } from "../testing/Git.ts";
+import { hasGit, gitEnv } from "../testing/Git.ts";
 import { sameProcessResult, runProcess } from "../testing/Process.ts";
 import { enableHubUnder, opensshPrivateKey } from "../testing/Hub.ts";
+import { encodeRepository } from "../social/Encode.ts";
+import { serve } from "../host/Node.ts";
+import { Result } from "effect";
 
 const source = path.resolve("src", "cli", "main.ts");
 const sea = path.resolve("dist", "sea", process.platform === "win32" ? "git+.exe" : "git+");
 
 describe.skipIf(!hasGit || !fs.existsSync(sea))("SEA CLI parity", () => {
+  it("retains build identity after installation and matches the final executable checksum", async () => {
+    const root = await fsPromises.mkdtemp(path.join(os.tmpdir(), "sea-build-info-"));
+    try {
+      const installed = path.join(root, "git+");
+      await fsPromises.copyFile(sea, installed);
+      await fsPromises.chmod(installed, 0o755);
+      const result = await runProcess({
+        command: installed,
+        args: ["--build-info"],
+        cwd: root,
+        env: { ...gitEnv, PATH: root },
+      });
+      assert.equal(result.code, 0, result.stderr.toString());
+      assert.equal(
+        result.stdout.toString(),
+        await fsPromises.readFile(path.join(path.dirname(sea), "build-info.json"), "utf8"),
+      );
+      assert.match(result.stdout.toString(), /"revision": "[0-9a-f]{40}"/);
+      assert.match(result.stdout.toString(), /"dirty": (true|false)/);
+      for (const [flag, file] of [
+        ["--license", "LICENSE"],
+        ["--licenses", "THIRD_PARTY_NOTICES.txt"],
+        ["--dependency-inventory", "dependency-inventory.json"],
+      ] as const) {
+        const included = await runProcess({
+          command: installed,
+          args: [flag],
+          cwd: root,
+          env: { ...gitEnv, PATH: root },
+        });
+        assert.equal(included.code, 0, included.stderr.toString());
+        assert.equal(
+          included.stdout.toString(),
+          await fsPromises.readFile(path.join(path.dirname(sea), file), "utf8"),
+        );
+        assert.ok(included.stdout.length > 1000);
+      }
+      const hash = createHash("sha256");
+      for await (const chunk of fs.createReadStream(installed)) hash.update(chunk);
+      assert.equal(
+        await fsPromises.readFile(path.join(path.dirname(sea), "SHA256SUMS"), "utf8"),
+        `${hash.digest("hex")}  ${path.basename(sea)}\n`,
+      );
+    } finally {
+      await fsPromises.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("clones, pushes, and fetches through the installed identity helper without Node", async () => {
+    const root = await fsPromises.mkdtemp(path.join(os.tmpdir(), "sea-helper-"));
+    const server = await serve({ root });
+    try {
+      const install = path.join(root, "standalone ' install");
+      await fsPromises.mkdir(install);
+      await fsPromises.copyFile(sea, path.join(install, "git+"));
+      await fsPromises.chmod(path.join(install, "git+"), 0o755);
+      // Install the actual generated helper artifact, retaining its target.
+      const link = await fsPromises.readlink(path.join(path.dirname(sea), "git-remote-git+id"));
+      await fsPromises.symlink(link, path.join(install, "git-remote-git+id"));
+      const gitPath = (process.env["PATH"] ?? "")
+        .split(path.delimiter)
+        .map((directory) => path.join(directory, "git"))
+        .find((file) => fs.existsSync(file));
+      assert.ok(gitPath);
+      await fsPromises.symlink(await fsPromises.realpath(gitPath), path.join(install, "git"));
+      const execPath = await runProcess({ command: "git", args: ["--exec-path"] });
+      assert.equal(execPath.code, 0);
+      const fixture = await enableHubUnder(root, "project", ["source.push"]);
+      const encoded = encodeRepository({ id: fixture.repoId, hints: [`${server.url}/project`] });
+      assert.ok(Result.isSuccess(encoded));
+      const environment = {
+        ...gitEnv,
+        PATH: install,
+        XDG_CONFIG_HOME: path.join(root, "config"),
+        GIT_EXEC_PATH: execPath.stdout.toString().trim(),
+        GIT_TERMINAL_PROMPT: "0",
+        GIT_CONFIG_COUNT: "2",
+        GIT_CONFIG_KEY_0: "credential.helper",
+        GIT_CONFIG_VALUE_0: "",
+        GIT_CONFIG_KEY_1: "credential.helper",
+        GIT_CONFIG_VALUE_1: '!f() { echo username=git; echo "password=$GIT_AUTH_TOKEN"; }; f',
+        GIT_AUTH_TOKEN: fixture.credential,
+      };
+      assert.equal(fs.existsSync(path.join(install, "node")), false);
+      const git = async (cwd: string, ...args: string[]) => {
+        const result = await runProcess({
+          command: path.join(install, "git"),
+          args,
+          cwd,
+          env: environment,
+        });
+        assert.equal(result.code, 0, result.stderr.toString());
+        return result.stdout.toString().trim();
+      };
+      const first = path.join(root, "first");
+      const second = path.join(root, "second");
+      await git(root, "clone", "--quiet", `git+id://${encoded.success}`, first);
+      await git(first, "checkout", "-B", "main");
+      await fsPromises.writeFile(path.join(first, "content.txt"), "one\n");
+      await git(first, "add", ".");
+      await git(first, "commit", "--quiet", "-m", "one");
+      await git(first, "push", "--quiet", "origin", "main");
+      await git(root, "clone", "--quiet", `git+id://${encoded.success}`, second);
+      assert.equal(await fsPromises.readFile(path.join(second, "content.txt"), "utf8"), "one\n");
+      await fsPromises.writeFile(path.join(second, "content.txt"), "two\n");
+      await git(second, "commit", "--quiet", "-am", "two");
+      await git(second, "push", "--quiet", "origin", "main");
+      await git(first, "fetch", "--quiet", "origin");
+      assert.equal(await git(first, "show", "origin/main:content.txt"), "two");
+      assert.equal(
+        await git(first, "rev-parse", "origin/main"),
+        await git(second, "rev-parse", "HEAD"),
+      );
+      assert.match(
+        await fsPromises.readFile(path.join(root, "config", "chr33s-git", "known_repos"), "utf8"),
+        /SHA256:/,
+      );
+    } finally {
+      await server.close({ force: true });
+      await fsPromises.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("installs session hooks that run without Node or a source checkout", async () => {
     const root = await fsPromises.mkdtemp(path.join(os.tmpdir(), "sea-hooks-"));
     try {

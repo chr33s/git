@@ -288,7 +288,7 @@ describe("cli queue", () => {
         {
           id: "s1",
           url: `http://127.0.0.1:${String(port)}/hook`,
-          secret: "shhh",
+          secret: "fixture-only-secret",
           createdAt: new Date(0).toISOString(),
         },
       ]),

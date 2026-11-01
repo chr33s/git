@@ -231,6 +231,7 @@ describe("Artifacts local provider", () => {
           const tokens = yield* Tokens;
 
           const created = yield* client.create("recycled");
+          const stale = yield* client.get("recycled");
           assert.equal(yield* tokens.verify("recycled", created.token), "write");
 
           yield* client.delete("recycled");
@@ -241,6 +242,14 @@ describe("Artifacts local provider", () => {
 
           yield* client.create("recycled");
           assert.equal(yield* tokens.verify("recycled", created.token), null);
+          for (const operation of [
+            stale.createToken("write", 300).pipe(Effect.asVoid),
+            stale.listTokens().pipe(Effect.asVoid),
+            stale.revokeToken(created.token).pipe(Effect.asVoid),
+          ]) {
+            const error = yield* operation.pipe(Effect.asVoid, Effect.flip);
+            assert.match(error.message, /NOT_FOUND/);
+          }
         }),
       );
     }),

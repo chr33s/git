@@ -32,6 +32,7 @@ import { push as pushToRemote, type PushRef } from "../client/Push.ts";
 import { isBinary, unified } from "../git/Diff.ts";
 import {
   AnchorResolutionFailure,
+  RequestLimitExceeded,
   Invalid,
   ObjectNotFound,
   PackCorrupt,
@@ -654,7 +655,7 @@ const repo = HttpApiGroup.make("repo")
     HttpApiEndpoint.get("whoami", "/whoami", {
       params: RepoParam,
       success: Whoami.Answer,
-      error: [Invalid],
+      error: [RequestLimitExceeded, Invalid],
     }),
   )
   .add(
@@ -964,7 +965,7 @@ const repo = HttpApiGroup.make("repo")
       success: GcReport,
       // `Invalid` when the repository lends its objects to a fork: refusing is
       // an answer the caller acts on, not a fault.
-      error: [ObjectNotFound, Invalid],
+      error: [RequestLimitExceeded, ObjectNotFound, Invalid],
     }),
   )
   .add(
@@ -1102,7 +1103,7 @@ const remotes = HttpApiGroup.make("remotes")
        * of five branches where one lost a race is four successes.
        */
       success: PushResult,
-      error: [PackCorrupt, ObjectNotFound, Invalid],
+      error: [RequestLimitExceeded, PackCorrupt, ObjectNotFound, Invalid],
     }),
   )
   .add(
@@ -1141,7 +1142,7 @@ const hub = HttpApiGroup.make("hub")
       params: RepoParam,
       query: Cursor,
       success: HubTaskPage,
-      error: [ObjectNotFound, Invalid],
+      error: [RequestLimitExceeded, ObjectNotFound, Invalid],
     }),
   )
   .add(
@@ -1149,7 +1150,7 @@ const hub = HttpApiGroup.make("hub")
       params: RepoParam,
       query: Cursor,
       success: HubPullPage,
-      error: [ObjectNotFound, Invalid],
+      error: [RequestLimitExceeded, ObjectNotFound, Invalid],
     }),
   )
   .add(
@@ -1157,14 +1158,14 @@ const hub = HttpApiGroup.make("hub")
       params: RepoParam,
       query: Cursor,
       success: HubSessionPage,
-      error: [ObjectNotFound, Invalid],
+      error: [RequestLimitExceeded, ObjectNotFound, Invalid],
     }),
   )
   .add(
     HttpApiEndpoint.get("session", "/hub/sessions/:id", {
       params: { ...RepoParam, id: Schema.String },
       success: HubSessionDetail,
-      error: [ObjectNotFound, Invalid],
+      error: [RequestLimitExceeded, ObjectNotFound, Invalid],
     }),
   )
   .add(
@@ -1174,14 +1175,14 @@ const hub = HttpApiGroup.make("hub")
     HttpApiEndpoint.get("members", "/hub/members", {
       params: RepoParam,
       success: HubMembersResponse,
-      error: [ObjectNotFound, Invalid],
+      error: [RequestLimitExceeded, ObjectNotFound, Invalid],
     }),
   )
   .add(
     HttpApiEndpoint.get("pull", "/hub/pulls/:id", {
       params: { ...RepoParam, id: Schema.String },
       success: HubPullDetail,
-      error: [ObjectNotFound, Invalid],
+      error: [RequestLimitExceeded, ObjectNotFound, Invalid],
     }),
   )
   .add(
@@ -1198,7 +1199,7 @@ const hub = HttpApiGroup.make("hub")
         head: Schema.optional(Schema.String),
       },
       success: HubNoteCheck,
-      error: [AnchorResolutionFailure, ObjectNotFound, Invalid],
+      error: [RequestLimitExceeded, AnchorResolutionFailure, ObjectNotFound, Invalid],
     }),
   )
   .add(
@@ -1206,14 +1207,14 @@ const hub = HttpApiGroup.make("hub")
       params: RepoParam,
       query: { ...Cursor, path: Schema.optional(Schema.String) },
       success: HubNotePage,
-      error: [ObjectNotFound, Invalid],
+      error: [RequestLimitExceeded, ObjectNotFound, Invalid],
     }),
   )
   .add(
     HttpApiEndpoint.get("note", "/hub/notes/:id", {
       params: { ...RepoParam, id: Schema.String },
       success: HubNoteDetail,
-      error: [ObjectNotFound, Invalid],
+      error: [RequestLimitExceeded, ObjectNotFound, Invalid],
     }),
   )
   .add(
@@ -1223,7 +1224,7 @@ const hub = HttpApiGroup.make("hub")
       params: RepoParam,
       query: { path: Schema.String, head: Schema.optional(Schema.String) },
       success: HubWhy,
-      error: [AnchorResolutionFailure, ObjectNotFound, Invalid],
+      error: [RequestLimitExceeded, AnchorResolutionFailure, ObjectNotFound, Invalid],
     }),
   )
   .add(
@@ -1231,7 +1232,7 @@ const hub = HttpApiGroup.make("hub")
       params: RepoParam,
       payload: HubEventRequest,
       success: HubEventAppended,
-      error: [RefConflict, ObjectNotFound, Invalid],
+      error: [RequestLimitExceeded, RefConflict, ObjectNotFound, Invalid],
     }),
   )
   .add(
@@ -1242,7 +1243,7 @@ const hub = HttpApiGroup.make("hub")
       params: { ...RepoParam, id: Schema.String },
       payload: HubMergeRequest,
       success: HubMerged,
-      error: [RefConflict, ObjectNotFound, Invalid],
+      error: [RequestLimitExceeded, RefConflict, ObjectNotFound, Invalid],
     }),
   )
   .prefix("/:repo");

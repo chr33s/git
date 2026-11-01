@@ -17,6 +17,7 @@ import { Effect } from "effect";
 import { Invalid, type ObjectNotFound, type StorageFailure } from "./Error.ts";
 import { Repository } from "./Repository.ts";
 import type { Oid } from "./Store.ts";
+import * as TraversalBudget from "./TraversalBudget.ts";
 
 /** Each commit in the walked set, mapped to the parents it named. */
 export type Parents = ReadonlyMap<Oid, ReadonlyArray<Oid>>;
@@ -67,6 +68,8 @@ export const reachable = Effect.fn("Dag.reachable")(function* (
   limit?: number,
 ) {
   const repository = yield* Repository;
+  const budget = yield* TraversalBudget.current;
+  yield* budget.spend(1);
 
   const parents = new Map<Oid, ReadonlyArray<Oid>>();
   /**
@@ -96,6 +99,9 @@ export const reachable = Effect.fn("Dag.reachable")(function* (
     }
 
     const commit = yield* repository.readHistoryCommit(oid);
+    // Charge edges before queueing them, including repeated/outside parents.
+    // Per-history ceilings alone do not bound a request walking many hub refs.
+    yield* budget.spend(commit.parents.length);
     parents.set(oid, commit.parents);
     for (const parent of commit.parents) {
       if (parent !== boundary && !parents.has(parent)) pending.push(parent);

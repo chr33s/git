@@ -47,14 +47,24 @@ describe.skipIf(!hasGit)("filesystem ref writers", () => {
           import { refStore } from ${JSON.stringify(import.meta.resolve("./Node.ts"))};
           import { RefStore } from ${JSON.stringify(import.meta.resolve("./Store.ts"))};
           const [root, tip, base, stage, atomic] = process.argv.slice(2);
-          const original = fs[stage];
-          // Fault injection stays in this child process and only affects the
-          // packed-ref rewrite, after reservation and expectation checks.
-          fs[stage] = async (...args) => {
-            const target = stage === "rename" ? args[1] : args[0];
-            if (target === root + "/packed-refs" || target.startsWith(root + "/packed-refs."))
-              throw Object.assign(new Error("simulated filesystem I/O failure"), { code: "EIO" });
-            return original(...args);
+          const originalOpen = fs.open;
+          const originalRename = fs.rename;
+          let injected = false;
+          const fail = () => {
+            injected = true;
+            throw Object.assign(new Error("simulated filesystem I/O failure"), { code: "EIO" });
+          };
+          // Fault injection stays in this child process and reaches the actual
+          // durable file-handle write, after reservation/expectation checks.
+          fs.open = async (...args) => {
+            const handle = await originalOpen(...args);
+            if (stage === "writeFile" && args[0].startsWith(root + "/packed-refs.") && args[0].endsWith(".tmp"))
+              handle.writeFile = async () => fail();
+            return handle;
+          };
+          fs.rename = async (...args) => {
+            if (stage === "rename" && args[1] === root + "/packed-refs") fail();
+            return originalRename(...args);
           };
           syncBuiltinESMExports();
           try {
@@ -65,10 +75,12 @@ describe.skipIf(!hasGit)("filesystem ref writers", () => {
                 { name: "refs/heads/main", value: null, expected: tip },
               ], { atomic: atomic === "true" });
             }).pipe(Effect.provide(refStore(root))));
+            assert.equal(injected, true, "the intended filesystem fault must be reached");
             assert.equal(result.at(-1).applied, false);
             assert.equal(result.at(-1).current, tip, "a refused deletion must preserve the tip");
           } finally {
-            fs[stage] = original;
+            fs.open = originalOpen;
+            fs.rename = originalRename;
             syncBuiltinESMExports();
           }
         `,

@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-30",
+  "kind": "local-native-cloudflare-component-recovery",
+  "sourceSha256": {
+    "src/host/BackupCodec.test.ts": "b494e502184fb17a8c0ca96164cfa79baafbd35420bd47ca718ee37c6448d33d",
+    "src/testing/BackupApplication.worker.ts": "ca02796772634995da34475d58ffb663d7713196edbdf0306c7f3d04510feae1",
+    "src/testing/BackupCodec.worker.ts": "86afa4cd15939084c7d02eea0c0c9e493e2b5b1bf3321c75f9c937217650908d",
+    "tools/copy-r2-backup.ts": "b681ed06543c8dab765dd2be6a285d6e1be96d366a9d0061e3a338e7e664e1fc",
+    "tools/cloudflare-backup-codec.ts": "243ca12c6e801d451bdb88cedd20f19fa1bf251011834aeb38940929b542e480",
+    "tools/cloudflare-kv-backup.ts": "26c99bf3821937b0c52ed8897542049d746a8b01902575ebd2cd6b3641779ce9",
+    "tools/cloudflare-sql-backup.ts": "ec1ee5c7944682281a50929e94b59dd3c6373113de79cb8d642ebf59e04b6849",
+    "tools/cloudflare-sql-restore.ts": "959370164992fa1acc6a0436d48fa2e62a24ef64ebd1e127124da7e1db2b41f4"
+  },
+  "nativeTests": {
+    "node24.12.0": {
+      "passed": 2,
+      "logSha256": "f2c31ec1fa3d8cb28832f858615bf945233ecb203a2b83cfef70cb8d6ad44865"
+    },
+    "node26.10.0": {
+      "passed": 2,
+      "logSha256": "9a7e47a08690bbdc3fa5f396a5ff671d5f73efefd000527b12baa07c5c2aebb2"
+    }
+  },
+  "stockGit": {
+    "version": "2.56.0",
+    "commands": [
+      "git verify-pack -v <recovered-index>",
+      "git -C <fresh-bare-repository> fsck --strict"
+    ],
+    "result": "passed",
+    "copiedR2Objects": 7,
+    "pack": "pack-09251cf330a7cc53533fec73cc0a2f128d251b68",
+    "head": "9b29bfad2f9c73f06ec23f1e3c045e336deb6495",
+    "logSha256": "09ae5da23ca7273adf8ab1957cd48e1cbb4416ad3efb290f2750b1407f801875",
+    "scope": "Pack/index downloaded from a fresh native R2 destination after copyR2Backup. Fresh bare repository supplied the conventional empty tree and fixture main ref."
+  },
+  "limits": [
+    "Local workerd only; no deployed account exercised.",
+    "Single-commit pack; does not qualify all delta/large-pack workloads.",
+    "Explicit fixture quiescence; no authenticated coordinator or production writer barrier.",
+    "Artifacts registry/token recovery remains untested.",
+    "Physical SQLite integrity and active multipart reconciliation are not qualified."
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "measuredAt": "2026-10-29T15:54:40.761Z",
+  "node": "v26.13.0",
+  "platform": "linux",
+  "arch": "arm64",
+  "kernel": "6.8.0-117-generic",
+  "git": "git version 2.39.5",
+  "filesystem": "ext4 on persistent Docker volume in isolated Colima VZ guest",
+  "bootBefore": "be017817-42e5-4462-bd8a-9cd436530452",
+  "bootAfter": "6e5c9e88-fb25-4982-bade-d26447e0ab4f",
+  "acknowledgedAtomicRefsAndCloneVerified": true,
+  "acknowledgedLfsDigestVerified": true,
+  "tokenRevocationAndPrivateModeVerified": true,
+  "forkOwnershipAndBorrowedHistoryVerified": true,
+  "anonymousReadsDenied": true,
+  "noPendingTransactionOrTemporaryFiles": true,
+  "subsequentAtomicPushVerified": true,
+  "limitsOfEvidence": "One forced guest VM stop and kernel restart; not physical power loss, hardware cache qualification, or every interruption window. Host storage remains powered."
+}

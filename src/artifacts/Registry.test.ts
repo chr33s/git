@@ -18,7 +18,10 @@ import { Effect, Layer } from "effect";
 
 import { Registry, registryMemory, registryNode, tokensMemory, tokensNode } from "./Namespace.ts";
 import { registryContract } from "./Registry.contract.ts";
-import { type Sql, sqlite } from "./Sqlite.ts";
+import { sqliteCapacityContract } from "./Sqlite.capacity.contract.ts";
+import { sqliteFailureContract } from "./Sqlite.failure.contract.ts";
+import { sqlite } from "./Sqlite.ts";
+import type { TransactionalSql } from "../git/Sql.ts";
 
 it.effect("independent Node registry handles preserve and observe each other's rows", () =>
   Effect.promise(async () => {
@@ -121,7 +124,20 @@ registryContract(
  * API takes one `exec` for everything; `node:sqlite` splits DDL (`exec`),
  * row-returning statements (`all`) and the rest (`run`).
  */
-const nodeSql = (database: DatabaseSync): Sql => ({
+const nodeSql = (database: DatabaseSync): TransactionalSql => ({
+  transactionSync: (body) => {
+    const savepoint = `registry_${crypto.randomUUID().replaceAll("-", "")}`;
+    database.exec(`SAVEPOINT ${savepoint}`);
+    try {
+      const value = body();
+      database.exec(`RELEASE ${savepoint}`);
+      return value;
+    } catch (error) {
+      database.exec(`ROLLBACK TO ${savepoint}`);
+      database.exec(`RELEASE ${savepoint}`);
+      throw error;
+    }
+  },
   exec: <Row extends Record<string, ArrayBuffer | string | number | null>>(
     query: string,
     ...bindings: ReadonlyArray<string | number | null>
@@ -142,6 +158,29 @@ const nodeSql = (database: DatabaseSync): Sql => ({
     return { toArray: () => statement.all(...bindings) as Row[] };
   },
 });
+
+sqliteFailureContract(
+  async (body) => {
+    const database = new DatabaseSync(":memory:");
+    try {
+      await body(nodeSql(database));
+    } finally {
+      database.close();
+    }
+  },
+  { describe, it },
+);
+sqliteCapacityContract(
+  async (body) => {
+    const database = new DatabaseSync(":memory:");
+    try {
+      await body(nodeSql(database));
+    } finally {
+      database.close();
+    }
+  },
+  { describe, it },
+);
 
 it.effect("migrates an existing SQLite registry without hiding completed repositories", () =>
   Effect.promise(async () => {

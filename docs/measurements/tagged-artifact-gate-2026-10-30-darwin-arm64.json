@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "measuredAt": "2026-10-30T04:49:28.634Z",
+  "build": {
+    "schemaVersion": 1,
+    "version": "0.1.1-release-rehearsal.20261030",
+    "revision": "bdd0ef6b278090a0121397218811b5fa594b5213",
+    "dirty": false,
+    "node": "26.10.0",
+    "platform": "darwin",
+    "arch": "arm64",
+    "packageLockSha256": "cb83ca602a3249763adbce71e9b893dbf09bb468f184b78c0c975da42e414acb"
+  },
+  "git": "git version 2.56.0",
+  "sourceBundleSha256": "aa1da72fb263fb40f196c3680bbf57f76218686137d0513944892a80d7b9434b",
+  "archiveSha256": "e740e5dea1cdbc38ff139ba21b28862ab81eba1cd09e6bf03f21b3adc90ee29b",
+  "archive": "git-plus-0.1.1-release-rehearsal.20261030-darwin-arm64.tar.gz",
+  "artifactDirectory": "dist/rehearsals/tagged-gate-20261030",
+  "cleanSnapshotAndVersionTagVerified": true,
+  "realExecutableReleasePreflightPassed": true,
+  "installedTestsPassed": 11,
+  "documentedPlatformSkips": 0,
+  "wrongNode24VerifierRejected": true,
+  "releasePackagingPassed": true,
+  "limitsOfEvidence": "Isolated synthetic prerelease snapshot with shared installed dependencies and local ad-hoc macOS signing. No main-worktree commit/tag, publisher signing, notarization, publication or supported-platform approval."
+}

@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-30",
+  "kind": "cloudflare-namespace-inventory-integrity",
+  "sourceSha256": {
+    "tools/inventory-cloudflare-objects.ts": "efb9f7145c82757f2fe4035893f74c4a6b6e7c02f01b096c8b8f5ebdbda17019",
+    "src/host/CloudflareInventory.test.ts": "041173557c679b96b2b7f9bfb3d8684a2dcb35e341217e335296db7ca35bd931"
+  },
+  "tests": {
+    "node24.12.0": {
+      "files": 1,
+      "passed": 19,
+      "logSha256": "56b9faf64f3aee204b9e1023a1f993f954a0c85f519d514a306b872da7db546d"
+    },
+    "node26.10.0": {
+      "files": 1,
+      "passed": 19,
+      "logSha256": "47cdde90a9d1f25d4b897affca92163fc20137d633ee0cde00048483a251da00"
+    }
+  },
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "f2d8be417eeb812ae21bc0fd14de6904c0fe72f4ec6cf140cc798c7412aaac66"
+  },
+  "coverage": [
+    "Duplicate object IDs rejected within and across API pages with disk-backed uniqueness tracking.",
+    "Version-2 digest binds account, namespace and exact NDJSON records, including empty inventories.",
+    "Data/report and directory synchronization precede successful discovery completion.",
+    "Saved-file verifier streams records and checks uniqueness, counts, scope, digest and bounded valid UTF-8 framing.",
+    "Tampered, truncated, oversized, symlinked and legacy records fail verification without changing input evidence.",
+    "Verifier CLI succeeds with no Cloudflare API token in child environment."
+  ],
+  "limits": [
+    "HTTP responses are controlled fixtures; no Cloudflare account API request was made.",
+    "Digest consistency alone does not authenticate API origin or prove complete enumeration.",
+    "Global writer isolation and signed whole-installation inventory remain required.",
+    "Private-file and directory durability checks ran locally on macOS; production filesystem/platform qualification remains open."
+  ]
+}

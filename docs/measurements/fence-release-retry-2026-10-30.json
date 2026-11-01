@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-30",
+  "kind": "idempotent-fence-release",
+  "sourceSha256": {
+    "src/host/CloudflareBackupFence.ts": "173b56343586e74984c5dce713779307ce2cb9cdda6f2be1c5706a16ddc0b1da",
+    "src/host/CloudflareBackupAdmin.ts": "a3e7e9a7b046d61f79b32c391f5db874c5ee524e162b677d34359144a3c4c627",
+    "src/host/BackupCodec.test.ts": "6f9c34c343399c2fa5cc22ae42b60c2717a30bcaeb5ea187a6414fa1ce940bea"
+  },
+  "tests": {
+    "node24.12.0": {
+      "files": 1,
+      "passed": 2,
+      "logSha256": "1f3e76b1d2a41b506fbfe2298e14f46199ea039be34a6664d6a5a2df576f351d"
+    },
+    "node26.10.0": {
+      "files": 1,
+      "passed": 2,
+      "logSha256": "457d2534e145e4580ed99530911bc30b23e33e1bec73df13b3deae3a0e86be9e"
+    }
+  },
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "e93d1cf9a4c91702a713ccb1e07445f1b1152b4ed95dcd91f529515eaa686f37"
+  },
+  "coverage": [
+    "Release succeeds again after target eviction when the fence has already been removed.",
+    "Delayed release for an earlier snapshot refuses a later snapshot fence and preserves 503 admission.",
+    "Existing native tests retain premature-release, malformed-fence and flush-failure coverage."
+  ],
+  "limits": [
+    "Released is an unfenced postcondition, not historical proof of a particular release operation.",
+    "Snapshot IDs must be unique per operation; caller must keep durable retirement/release progress.",
+    "No production deployment or whole-namespace release coordinator is qualified by these tests."
+  ]
+}

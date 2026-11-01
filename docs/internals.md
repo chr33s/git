@@ -30,7 +30,28 @@ with `save-exact=true` so dependency upgrades are tested together.
 | `typescript`              | `7.0.2`         | TypeScript-Go                                                |
 
 `@alchemy.run/cloudflare` is behind a `patch-package` patch for deferred
-`RepoClient.raw` handles. Alchemy's Cloudflare exports now live in that package.
+`RepoClient.raw` handles and the Worker runtime platform layer. Workerd cannot
+initialize Node terminal/child-process services; the patched bridge provides
+Node crypto, filesystem, and path adapters without eagerly reading `stdin.once`.
+`npm run verify:worker` exercises the actual entry to catch this startup failure.
+Alchemy's Cloudflare exports now live in that package.
+Operator tooling directly pins `@alchemy.run/cloudflare-runtime` at the matching
+`2.0.0-beta.84` and `@distilled.cloud/cloudflare` at `1.0.0-rc.17`. The backup
+connector uses their scoped service/R2 proxies and provider metadata API; these
+were already transitive dependencies and are now explicit development dependencies.
+The pinned Foldkit runtime also has a `patch-package` patch for modal Tab
+navigation: WebKit can skip intermediate controls during native traversal and
+leave a dialog before reaching its last focusable element. The patch explicitly
+advances focus within the modal in both directions. The production UI verifier
+covers this alongside trigger focus restoration; retain that browser regression
+when upgrading or removing the patch.
+The pinned Miniflare test runtime has a small `patch-package` fix for upload
+stream cleanup: after `prefixStream` releases its writer lock, a failed body
+must abort the writable stream rather than the detached writer. Without it,
+killing a coordinator during a streamed R2 upload produces an unhandled
+`ERR_INVALID_STATE` rejection. `src/miniflare.test.ts` covers both writer-lock
+states; the native R2 process-death rehearsal covers the interrupted upload.
+Retain these regressions when upgrading or removing the patch.
 Overrides align Foldkit's exact Effect 4.0.0 peers with Effect 4.0.7 and make
 all Vite consumers use Vite+'s core to share one module registry.
 
@@ -339,7 +360,14 @@ operator recovery. Fork bookkeeping separately reserves `.forks.json.lock` and
 reloads the current links before changing them. Reads refresh the document;
 changed links invalidate composed stores, including cached descendants. A local
 semaphore keeps refresh and composition from racing that provider's own writes.
-Token snapshots still belong to individual providers and need separate review.
+Tokens reload `.tokens.json` for every verification and mutation. Mutations hold
+`.tokens.json.lock`, publish private files by rename, and sync the file and parent
+directory. Failed publication never updates an in-memory authority snapshot.
+Token operations through a repository handle also reserve its lifecycle and
+check its immutable ID, so a handle obtained before deletion cannot issue or
+revoke credentials for a replacement repository. Invalid token/remote/webhook
+metadata fails closed and is preserved for operator recovery; missing optional
+metadata remains an empty registry.
 
 Node object stores cache each alternates file separately and validate every file
 in the transitive chain on lookup. An intermediate repository can change its
@@ -479,8 +507,37 @@ pack _at rest_ can take that shortcut: `Pack.ts` reads a pack off the wire,
 where objects are back to back and the decoder has to report where each stream
 ended, and it keeps the portable one everywhere. The browser keeps it for both.
 Negotiation bodies are gzip'd the other way: `Protocol.ts` uses
-`DecompressionStream`, not `node:zlib`, because that module is the Worker
-handler and must not import a node builtin.
+the portable `RequestBody.ts` reader and `DecompressionStream`, not `node:zlib`.
+The reader owns cancellation and enforces decoded-byte budgets. `RequestLimits.ts`
+loads positive-integer host configuration for negotiation bytes/packets,
+receive bytes/commands, and LFS batch bytes/object counts. The shared router also
+sets Effect's `MaxBodySize` for buffered JSON API parsing without buffering raw
+streaming routes. Raw protocol failures
+use `RequestLimitExceeded`/HTTP 413 before unpacking; an overflow during unpacking
+fails its Git report without applying refs. These request budgets do not establish
+repository capacity, object-walk work limits, or crash durability.
+`Pack.ImportBudget` bounds declared object count and cumulative expanded bytes
+on both import paths, including duplicate objects and delta targets; the HTTP
+receive handler supplies configured limits. LFS PUTs enforce their own streaming
+byte ceiling independently of batch declarations or Content-Length.
+The Node host's `Admission.node.ts` validates connection/request/deadline settings
+and holds host/per-repository leases through authentication, queueing, and response
+delivery. Transport deadlines abort clients without releasing a still-running
+mutation's lease or repository gate. These controls are separate from the
+Cloudflare runtime and do not preempt synchronous CPU work.
+Client HTTP operations read the optional `client/Transport.ts` service before
+entering async fetch code. The Node host provides `Egress.node.ts` to JSON API
+operations and captures it separately for background replication and webhooks.
+The latter binds Effect's fetch reference around request execution, since merely
+providing it while constructing a client would not retain it for later fibers.
+DNS filtering runs inside the connector, preserving the checked address through
+socket creation. Browser/library callers without a transport retain native fetch.
+The deployable Cloudflare host provides `Egress.cloudflare.ts` at those same
+three call sites. It defaults to denying all origins and permits only explicit
+operator-trusted HTTPS origins; it does not inspect resolved addresses. Native
+redirect following is disabled, with only bounded same-origin read redirects
+followed by the adapter. This is a separate policy with a narrower trust contract,
+not the Node connector's DNS protection.
 
 Two platform modules are not named `*.node.ts`, on purpose. `git/Node.ts` is
 the filesystem backend the module map already names; the file is the adapter,
@@ -507,7 +564,7 @@ rather than memoized per instance — a cached context would pin a stale
 
 ### Effect v4 in this repo
 
-Read `.claude/skills/effect` before writing Effect code. Points that have
+Read `.agents/skills/effect` before writing Effect code. Points that have
 actually bitten:
 
 - `Effect.catch`, not `catchAll`. `Effect.ignore`, not `ignoreLogged`.
@@ -545,9 +602,9 @@ value is thrown, not yielded).
 
 ## Testing
 
-`npm test` runs both vitest projects — `unit` and `integration` (the workerd
-harness). `npm run test:unit` is the fast loop, while `npm run test:integration`
-runs the workerd project alone. The interop tests
+`npm test` runs all three vitest projects — `unit`, `integration` (the workerd
+harness), and `interop`. `npm run test:unit` is the fast loop, while
+`npm run test:integration` runs the workerd project alone. The interop tests
 need `git` on `PATH` and skip without it; the real-browser test needs Chromium
 via Playwright and skips without it.
 
@@ -770,8 +827,8 @@ writable by nobody — it has no membership to authorize a write with. `serve
 which is what a scratch server wants and what a shared one should not have.
 
 Clients present one of two things. A _delegated credential_ is a short-lived
-token the holder signs with their own SSH key and `git` carries as
-`http://<credential>@host/repo` — `git+ credential` mints it, and it can
+token the holder signs with their own SSH key and `git` carries as the Basic
+password supplied by a credential helper — `git+ credential` mints it, and it can
 never carry more than the person running it already had. A _signed envelope_ is
 the native path: the server issues a nonce, the client signs the operation and
 the refs it is moving, and the signature is checked against the same log.
@@ -816,9 +873,11 @@ for its bases.
 
 ## Open questions
 
-- **Bundle size in a Worker is unmeasured.** Effect core plus `http`
-  and `http-api` is not small, and nothing has checked it against the
-  3 MiB compressed limit.
+- **Worker deployment size and resource qualification remain open.**
+  `npm run verify:worker -- new-bundle-report.json` records the local emitted
+  modules' sizes, gzip sizes and hashes. This excludes static assets, source maps
+  and upload metadata; validate the actual production upload and runtime resource
+  use against the target account before release. See [operations](operations.md#local-verification-of-the-deployable-worker).
 - **`alchemy` is still beta** and breaks between releases. Effect 4 is stable.
 - **Fetch-path deltas and thin packs.** Repack writes ofs-deltas; live
   upload-pack stays full-object. Measure before spending serve-time CPU on

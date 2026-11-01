@@ -12,6 +12,8 @@ import { describe, it } from "@effect/vitest";
 import { Effect, Layer } from "effect";
 
 import * as Dag from "./Dag.ts";
+import { RequestLimitExceeded } from "./Error.ts";
+import * as TraversalBudget from "./TraversalBudget.ts";
 import { EMPTY_TREE_OID, type Signature } from "./Format.ts";
 import { stores } from "./Memory.ts";
 import * as GitRepository from "./Repository.ts";
@@ -43,6 +45,41 @@ const absent = (count: number): ReadonlyArray<Oid> =>
   Array.from({ length: count }, (_, at) => `${at}`.padStart(40, "a") as Oid);
 
 describe("Dag.reachable", () => {
+  it.effect("charges repeated edges before expanding the pending walk", () =>
+    Effect.promise(() =>
+      scenario(
+        Effect.gen(function* () {
+          const repository = yield* Repository;
+          const parent = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: [],
+            message: "parent",
+            author,
+          });
+          const head = yield* repository.commitTree({
+            tree: EMPTY_TREE_OID,
+            parents: Array.from({ length: 128 }, () => parent),
+            message: "wide join",
+            author,
+          });
+          const asked: Oid[] = [];
+          const belongs = (oid: Oid) =>
+            Effect.sync(() => {
+              asked.push(oid);
+              return true;
+            });
+          const error = yield* Dag.reachable(head, null, belongs).pipe(
+            Effect.provideService(TraversalBudget.TraversalBudget, TraversalBudget.make(8)),
+            Effect.flip,
+          );
+          assert.ok(error instanceof RequestLimitExceeded);
+          assert.deepEqual(asked, [head]);
+          assert.equal((yield* Dag.reachable(head)).size, 2);
+        }),
+      ),
+    ),
+  );
+
   it.effect("pays for a commit it turns away exactly once, and counts it", () =>
     Effect.promise(async () => {
       // A commit outside the history was never recorded, so the question was

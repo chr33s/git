@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-30",
+  "kind": "actual-worker-release-retry",
+  "sourceSha256": {
+    "src/worker.ts": "ec3ba1bde8e0bdd63d72d5a86132aba592e6c5327f40e06a1716ce4b1ac964d6",
+    "src/host/Cloudflare.ts": "d418c1a59eba91eb50b1f4e3145ee05c730fb5f394e057d8924359dcd367b413",
+    "src/host/CloudflareBackupAdmin.ts": "a3e7e9a7b046d61f79b32c391f5db874c5ee524e162b677d34359144a3c4c627",
+    "src/host/CloudflareBackupFence.ts": "173b56343586e74984c5dce713779307ce2cb9cdda6f2be1c5706a16ddc0b1da",
+    "tools/worker-backup-fixture.ts": "d0cd22f7957225e5b3ac4686b70d65a06928a2860f21bb87755d2b3f5a842b33",
+    "tools/verify-worker.ts": "84eca71442773ae1a23afa982f10bdafa383c3fd91c1f6afa6833e168f6b9bd1"
+  },
+  "runs": [
+    {
+      "node": "26.10.0",
+      "passed": true,
+      "stage": "verify-worker-c5225a46-dd37-4487-8e6c-25c6b643a408",
+      "origin": "http://localhost:49646",
+      "logSha256": "e46944ef785d944baac8bc2eac4770120bae25733ea2dc62df6a0019b8653d7f",
+      "bundle": {
+        "schemaVersion": 1,
+        "measuredAt": "2026-10-30T14:02:08.523Z",
+        "kind": "local-worker-bundle",
+        "compression": "sum of independently gzip-compressed modules, zlib level 9",
+        "bytes": 1122372,
+        "gzipBytes": 328846,
+        "modules": [
+          {
+            "name": "process-D77oA2Mj.js",
+            "bytes": 7727,
+            "gzipBytes": 2584,
+            "sha256": "2c61d58723565f1b0001d7302a0c9afa604c1065ce778635e64a08e059171f85"
+          },
+          {
+            "name": "rolldown-runtime-BdAlPI6C.js",
+            "bytes": 1493,
+            "gzipBytes": 798,
+            "sha256": "a9fab4e71913e89808596a89ed754ae7824f05588ac8890a728c858c386bda4f"
+          },
+          {
+            "name": "tty-f2uVVrQA.js",
+            "bytes": 1495,
+            "gzipBytes": 663,
+            "sha256": "e8c4ae211a08774e5a837bc95ada0d1e3221362b1e4a17e4159b9b4c4d74f183"
+          },
+          {
+            "name": "worker.js",
+            "bytes": 1111657,
+            "gzipBytes": 324801,
+            "sha256": "6a72e134128b753e3b80a9e53b8fc79d4d07191b9e49b1d994af2ea2135ab603"
+          }
+        ],
+        "excludedSourceMaps": ["process-D77oA2Mj.js.map", "tty-f2uVVrQA.js.map", "worker.js.map"],
+        "limitsOfEvidence": "Actual local Alchemy Worker build; excludes static assets, source maps and upload multipart metadata. Not a production upload receipt, account-limit check, startup CPU or runtime memory measurement."
+      }
+    },
+    {
+      "node": "24.12.0",
+      "passed": true,
+      "stage": "verify-worker-fef55042-b6ad-4f5b-b9ca-5d988c5db1eb",
+      "origin": "http://localhost:50677",
+      "logSha256": "7328e71b22faea95950aa7334bc1b1f0534d0fb73e138ae5b14cf7f856c45fcf",
+      "bundle": {
+        "schemaVersion": 1,
+        "measuredAt": "2026-10-30T14:05:30.057Z",
+        "kind": "local-worker-bundle",
+        "compression": "sum of independently gzip-compressed modules, zlib level 9",
+        "bytes": 1122372,
+        "gzipBytes": 328845,
+        "modules": [
+          {
+            "name": "process-D77oA2Mj.js",
+            "bytes": 7727,
+            "gzipBytes": 2584,
+            "sha256": "2c61d58723565f1b0001d7302a0c9afa604c1065ce778635e64a08e059171f85"
+          },
+          {
+            "name": "rolldown-runtime-BdAlPI6C.js",
+            "bytes": 1493,
+            "gzipBytes": 798,
+            "sha256": "a9fab4e71913e89808596a89ed754ae7824f05588ac8890a728c858c386bda4f"
+          },
+          {
+            "name": "tty-f2uVVrQA.js",
+            "bytes": 1495,
+            "gzipBytes": 663,
+            "sha256": "e8c4ae211a08774e5a837bc95ada0d1e3221362b1e4a17e4159b9b4c4d74f183"
+          },
+          {
+            "name": "worker.js",
+            "bytes": 1111657,
+            "gzipBytes": 324800,
+            "sha256": "0e5e9ce24c5d31a8ef1df952c16ef5b3d75ed2b1bf6a30071e330da35ac0be08"
+          }
+        ],
+        "excludedSourceMaps": ["process-D77oA2Mj.js.map", "tty-f2uVVrQA.js.map", "worker.js.map"],
+        "limitsOfEvidence": "Actual local Alchemy Worker build; excludes static assets, source maps and upload multipart metadata. Not a production upload receipt, account-limit check, startup CPU or runtime memory measurement."
+      }
+    }
+  ],
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "a0e8247c821c507734569f2f7a3d91e3301d514ab0abee28d110f3a28a2ffc25"
+  },
+  "coverage": [
+    "Private namespace RPC through the actual Alchemy bridge and production DO implementation.",
+    "Repeated Release succeeds after a completed release.",
+    "A delayed prior-snapshot Release fails while the later snapshot remains held and production request admission returns 503.",
+    "Matching later-snapshot Release succeeds.",
+    "Full existing actual Worker verification: UI/CSP, authenticated Git/LFS, default-deny writes, admission/resource budgets, provisioning/restart, local R2/SQLite/deployment-state recovery, fault signals and native challenge/replay protection."
+  ],
+  "limits": [
+    "Local workerd only; no Cloudflare account deployment or upload occurred.",
+    "Private-RPC archive rehearsal uses an empty object and placeholder resource digests; not whole-installation namespace recovery evidence.",
+    "Measured module sizes exclude static assets, sourcemaps and upload metadata; no account CPU/memory qualification.",
+    "Source full-suite evidence predates only this additional verifier fixture; this changed fixture was exercised in both actual Worker runs."
+  ]
+}

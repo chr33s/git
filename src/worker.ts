@@ -11,7 +11,7 @@
  */
 import type { RuntimeContext } from "alchemy";
 import * as Alchemy from "@alchemy.run/cloudflare";
-import { Effect, Layer } from "effect";
+import { Config, Effect, Layer, Option, Schema } from "effect";
 import { HttpServerRequest, HttpServerResponse } from "effect/http";
 
 import { objectStore, packStore } from "./git/Cloudflare.ts";
@@ -19,18 +19,29 @@ import * as GitRepository from "./git/Repository.ts";
 import { Storage } from "./git/Store.ts";
 import Repos from "./host/Cloudflare.ts";
 import { Repo } from "./host/Cloudflare.ts";
+import * as CloudflareRequest from "./host/CloudflareRequest.ts";
+import * as CloudflareAdmission from "./host/CloudflareAdmission.ts";
+import * as CloudflareRate from "./host/CloudflareRate.ts";
+import * as BackupAdmin from "./host/CloudflareBackupAdmin.ts";
+import { Invalid } from "./git/Error.ts";
+import * as RequestUpload from "./host/RequestUpload.ts";
 import { normalize, routeOf, UI_HOME, UI_PREFIX } from "./server/Route.ts";
+import * as SnapshotCapacity from "./server/SnapshotCapacity.ts";
 import * as Snapshot from "./server/Snapshot.ts";
+import * as RequestLimits from "./server/RequestLimits.ts";
 import { Objects } from "./objects.ts";
+import { keyOf as provisioningKey } from "./server/Provisioning.ts";
 
 /**
- * The Worker's public contract: it serves HTTP, nothing more.
+ * Public requests use fetch. Backup administration is private service-binding
+ * RPC only; the HTTP router never dispatches this method.
  *
  * `RuntimeContext` is in the requirements because the stateless read path
  * resolves the R2 binding per request (`bucket.raw` is handler-coloured by
  * design); the bridge provides it, exactly as it does inside the DO.
  */
 export type GitBindings = {
+  readonly backup: (request: BackupAdmin.Request) => Effect.Effect<string, Invalid, RuntimeContext>;
   readonly fetch: Effect.Effect<
     HttpServerResponse.HttpServerResponse,
     never,
@@ -46,7 +57,19 @@ export class Git extends Alchemy.Worker<Git, GitBindings, Repo>()("git") {}
  * `alchemy.run.test.ts`: the runtime the integration suite proves must be
  * the runtime this Worker deploys.
  */
-export const compatibility = { date: "2025-12-10", flags: ["nodejs_compat"] };
+export const compatibility = {
+  date: "2025-12-10",
+  // Even an allowlisted same-zone URL must use the public security/routing path.
+  flags: ["nodejs_compat", "global_fetch_strictly_public"],
+};
+
+/** Retain application signals without automatic request URL/header logging. */
+export const observability = {
+  enabled: true,
+  redactQueryString: true,
+  logs: { enabled: true, invocationLogs: false, headSamplingRate: 1, persist: true },
+  traces: { enabled: false },
+};
 
 /** Vite's `base`, and the asset manifest's prefix. Trailing slash required. */
 const UI_BASE = `${UI_PREFIX}/`;
@@ -88,7 +111,15 @@ interface AssetFetcher {
 export default Git.make(
   {
     main: import.meta.url,
+    dev: {
+      port: Config.schema(
+        Schema.Int.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(65535)),
+        "GIT_DEV_PORT",
+      ).pipe(Config.withDefault(1337)),
+      strictPort: Config.Boolean("GIT_DEV_STRICT_PORT").pipe(Config.withDefault(false)),
+    },
     compatibility,
+    observability,
     // The Vite+ UI build (`vp build` → `dist/ui`) rides along as the
     // Worker's static assets, so the page and its requests to `/:repo/...`
     // stay same-origin — the arrangement the UI's readme promises. Routing
@@ -99,19 +130,26 @@ export default Git.make(
     // the entry outputs are missing, so a deploy cannot publish the API with
     // no UI behind it.
     //
-    // `base` mirrors Vite's: the manifest is uploaded under `/hub/`, so
-    // nothing the UI owns sits at the origin root where a repository name
-    // could shadow it — and `hub` itself is reserved in `server/Route.ts`,
-    // which is the other half of that guarantee. Cloudflare matches the
-    // manifest literally and never strips a prefix, which is why the prefix
-    // is applied at upload rather than per request. `notFoundHandling` stays
-    // at its default: `single-page-application` would answer *every*
-    // unmatched path with the page, swallowing `/:repo/info/refs` before
-    // this script ever saw it.
-    assets: { directory: "dist/ui", base: UI_BASE },
+    // The generated directory contains hub/* and root _headers. This makes
+    // the public paths identical in Alchemy's deploy and local runtimes; the
+    // local asset provider does not implement the deploy manifest's `base`.
+    // Keep SPA fallback disabled so Git paths cannot become HTML responses.
+    assets: { directory: "dist/worker-assets" },
   },
   Effect.gen(function* () {
     const repos = yield* Repo;
+    const rate = yield* CloudflareRate.configuration().pipe(Effect.orDie);
+    const limiter = Option.isSome(rate.namespace)
+      ? yield* Alchemy.Workers.RateLimit("GIT_CLIENT_RATE", {
+          namespaceId: rate.namespace.value,
+          simple: { limit: rate.limit, period: 60 },
+        })
+      : undefined;
+    const snapshotBytes = yield* SnapshotCapacity.configuration.pipe(Effect.orDie);
+    const budgets = yield* RequestLimits.configuration().pipe(Effect.orDie);
+    const requestLimits = Layer.succeed(RequestLimits.RequestLimits)(budgets);
+    const admit = yield* CloudflareAdmission.make("CloudflareEdge").pipe(Effect.orDie);
+    const uploadIdleMs = yield* RequestUpload.configuration().pipe(Effect.orDie);
     const bucket = yield* Alchemy.R2.ReadWriteBucket(Objects);
 
     // Read once, with the other bindings, rather than per request: this is
@@ -139,16 +177,15 @@ export default Git.make(
       request: Request,
     ): Effect.Effect<Response | null> =>
       Effect.gen(function* () {
-        const held = yield* Effect.promise(() => r2.get(Snapshot.keyOf(repo)).catch(() => null));
-        if (held === null) return null;
-        const bytes = yield* Effect.promise(() =>
-          held
-            .arrayBuffer()
-            .then((buffer) => new Uint8Array(buffer))
-            .catch((): Uint8Array | null => null),
+        // An operator-supplied bootstrap artifact must reach the writer even
+        // when an earlier anonymous read published an empty public snapshot.
+        if ((yield* Effect.promise(() => r2.head(provisioningKey(repo)))) !== null) return null;
+        const snapshot = yield* Snapshot.load(
+          Effect.promise(async () => {
+            const held = await r2.get(Snapshot.keyOf(repo));
+            return held === null ? null : await SnapshotCapacity.read(held, snapshotBytes);
+          }),
         );
-        if (bytes === null) return null;
-        const snapshot = Snapshot.decode(bytes);
         if (snapshot === null || !snapshot.anonymousRead) return null;
 
         const stores = Layer.mergeAll(
@@ -163,13 +200,45 @@ export default Git.make(
               Layer.provideMerge(stores),
             ),
           ),
-          // A read this path cannot complete is not an error the client
-          // sees; it is a read the writer serves instead.
-          Effect.orElseSucceed((): Response | null => null),
         );
-      }).pipe(Effect.catchCause(() => Effect.succeed(null)));
+      }).pipe(
+        Effect.provide(requestLimits),
+        // Exhausting a request budget is a refusal, not a reason to repeat
+        // the same traversal in the Durable Object.
+        Effect.catchTag("RequestLimitExceeded", (error) =>
+          Effect.succeed(
+            Response.json(
+              {
+                _tag: error._tag,
+                budget: error.budget,
+                limit: error.limit,
+              },
+              { status: 413, headers: { "cache-control": "no-store" } },
+            ),
+          ),
+        ),
+        // Failures before a Response is returned fall back to the writer.
+        // A later streaming-body failure cannot safely replay that response.
+        Effect.catchCause(() =>
+          Effect.logWarning("snapshot response failed; authoritative reads required", {
+            component: "SnapshotReader",
+            operation: "serve",
+          }).pipe(Effect.as(null)),
+        ),
+      );
 
     return {
+      backup: Effect.fn("Cloudflare.backup")(function* (input: BackupAdmin.Request) {
+        const invalid = () => new Invalid({ field: "backup", reason: "backup proxy rejected" });
+        const request = yield* Schema.decodeEffect(BackupAdmin.Request)(input).pipe(
+          Effect.mapError(invalid),
+        );
+        const target = yield* Effect.try({
+          try: () => repos.get(repos.idFromString(request.objectId)),
+          catch: invalid,
+        });
+        return yield* target.backup(request).pipe(Effect.mapError(invalid));
+      }),
       fetch: Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest;
         const url = new URL(request.url, "http://x");
@@ -236,29 +305,55 @@ export default Git.make(
         // only the Durable Object can read. So the guard moved in there, and
         // this Worker is a router again.
 
-        // A client that hangs up mid-clone is not a server error. 499 is
-        // nginx's code for it, and it keeps aborted fetches out of the 5xx
-        // rate that pages someone.
-        // The stub's `fetch` speaks the effect request and response, which is
-        // what the Durable Object bridge on the other side hands its handler;
-        // passing the platform `Request` here would leave the DO rebuilding a
-        // request it cannot read a body from.
-        return yield* repos
-          .getByName(route.repo)
-          .fetch(HttpServerRequest.fromWeb(raw))
-          .pipe(
-            Effect.catchCause((cause) =>
-              raw.signal.aborted
-                ? Effect.succeed(HttpServerResponse.empty({ status: 499 }))
-                : // The contract says this Worker does not fail: a fault
-                  // inside the DO is a 500 at the edge, not a rejected effect.
-                  Effect.as(Effect.logError(cause), HttpServerResponse.empty({ status: 500 })),
-            ),
+        return yield* repos.getByName(route.repo).fetch(HttpServerRequest.fromWeb(raw));
+      }).pipe((request) =>
+        Effect.gen(function* () {
+          const incoming = yield* HttpServerRequest.HttpServerRequest;
+          // SAFETY: the bridge retains the platform Request as source.
+          const original = incoming.source as Request;
+          const cancellation = new AbortController();
+          const upload = RequestUpload.open(
+            original,
+            AbortSignal.any([original.signal, cancellation.signal]),
+            uploadIdleMs,
           );
-      }),
+          const bounded = upload.request;
+          const signal = bounded.signal;
+          const context = yield* Effect.context<never>();
+          return yield* CloudflareRequest.respond(
+            admit(
+              Effect.gen(function* () {
+                if (limiter !== undefined) {
+                  const refused = yield* CloudflareRate.check(bounded, yield* limiter.raw);
+                  if (refused !== null) return HttpServerResponse.raw(refused);
+                }
+                return yield* request;
+              }).pipe(
+                Effect.provideService(
+                  HttpServerRequest.HttpServerRequest,
+                  HttpServerRequest.fromWeb(bounded),
+                ),
+                Effect.map((response) =>
+                  HttpServerResponse.toWeb(response, {
+                    signal,
+                    context,
+                    withoutBody: incoming.method === "HEAD",
+                  }),
+                ),
+              ),
+              () => cancellation.abort(),
+              Effect.promise(() => upload.idle),
+            ).pipe(Effect.ensuring(Effect.sync(upload.close)), Effect.map(HttpServerResponse.raw)),
+            signal,
+            "CloudflareEdge",
+          );
+        }),
+      ),
     };
     // The host Worker's layer also provides its DO's live implementation —
     // that is what makes `yield* Repo` above resolve — and the bucket binding
     // implementation serves both phases, exactly as it does inside the DO.
-  }).pipe(Effect.provide([Repos, Alchemy.R2.ReadWriteBucketBinding])),
+  }).pipe(
+    Effect.provide([Repos, Alchemy.R2.ReadWriteBucketBinding, Alchemy.Workers.RateLimitBinding]),
+  ),
 );

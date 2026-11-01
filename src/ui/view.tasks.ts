@@ -108,6 +108,7 @@ const newTask = (h: Html.HtmlBuilder<AppMessage>, model: Model): Html.Html =>
     h.button(
       [
         h.Class("gp-btn-primary"),
+        h.DataAttribute("dialog-trigger", "newTask"),
         h.OnClick(AppMessage.ClickedOpenDialog({ name: "newTask" })),
         h.Type("button"),
       ],

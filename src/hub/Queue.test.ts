@@ -78,6 +78,7 @@ describe("hub Queue", () => {
                   if (concurrent === "same-head re-entry") {
                     yield* Queue.leave({ repo: REPO, queue, pr, key, reason: "withdrawn" }).pipe(
                       Effect.provideService(Repository, repository),
+                      Effect.catchTag("RequestLimitExceeded", Effect.die),
                     );
                     yield* Queue.enter({ repo: REPO, queue, pr, head, key }).pipe(
                       Effect.provideService(Repository, repository),

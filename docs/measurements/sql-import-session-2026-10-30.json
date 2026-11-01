@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-30",
+  "kind": "durable-sql-import-session",
+  "sourceSha256": {
+    "tools/cloudflare-sql-import.ts": "4cbd04dd4a20f532b325c4eac79f9655bbff481df768c17a8f027a287682415f",
+    "tools/cloudflare-sql-restore.ts": "959370164992fa1acc6a0436d48fa2e62a24ef64ebd1e127124da7e1db2b41f4",
+    "tools/cloudflare-backup-inventory.ts": "ddd8386bdee1b23ccba944450e6786d09d39fb02f16adc0f1757c337a68b60dd",
+    "src/host/CloudflareBackupFence.ts": "1d7e4d83ede2d8fea930fea0150e50397740d439785525894fee869ee866fb30",
+    "src/testing/BackupCodec.worker.ts": "8f9abe7e7ce08355c44609afbe80f566079c886a13b0c6acc1197fa593000cfd",
+    "src/host/BackupCodec.test.ts": "98fc7ad3ba853d79991559432d75865464c26c37d6566c0a21c9af3409adf865"
+  },
+  "tests": {
+    "node24.12.0": {
+      "files": 1,
+      "passed": 2,
+      "logSha256": "3a065c42f4f17b76a2f5c2689f2eaa5fd475150362e4699a9b2b605dadd11f16"
+    },
+    "node26.10.0": {
+      "files": 1,
+      "passed": 2,
+      "logSha256": "ca17720928d50f89b017ae9243e221208470c7fd2f5f83dfe4dc3c8aa128e93a"
+    }
+  },
+  "coverage": [
+    "Native transaction rollback of SQL schema, rows and progress when KV inventory checkpoint write fails.",
+    "Concurrent duplicate and lost acknowledgement retries advance inventory once.",
+    "Eviction preserves progress and completion receipts; older replay rejected.",
+    "Invalid signed resource summary and checkpoint-write failure prevent finalization.",
+    "Imported SQL pages and inventory match source; completion leaves request fence closed."
+  ],
+  "limits": [
+    "Private single-object SQL session; caller binds plan to actual object identity.",
+    "KV control-key integration and completed receipt cleanup remain open.",
+    "Whole-installation coordination, resource enumeration and deployed recovery are not established."
+  ]
+}

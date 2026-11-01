@@ -487,7 +487,7 @@ describe.skipIf(!hasGit)("Fetch, checked by the git binary", () => {
  * `have`/`ACK` conversation is the protocol rather than a private dialect our
  * own server happens to accept.
  */
-const httpBackend = async (projectRoot: string): Promise<Server> => {
+const httpBackend = async (projectRoot: string): Promise<Pick<Server, "url" | "close">> => {
   const server = http.createServer((incoming, outgoing) => {
     const url = new URL(incoming.url ?? "/", "http://backend");
     const child = spawn(httpBackendPath, [], {
@@ -559,7 +559,7 @@ const httpBackend = async (projectRoot: string): Promise<Server> => {
 
 describe.skipIf(!hasHttpBackend)("Fetch, negotiating with git-http-backend", () => {
   let backendRoot: string;
-  let backend: Server;
+  let backend: Awaited<ReturnType<typeof httpBackend>>;
 
   beforeAll(async () => {
     backendRoot = await fs.mkdtemp(path.join(os.tmpdir(), "client-fetch-backend-"));

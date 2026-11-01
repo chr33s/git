@@ -37,6 +37,10 @@ They share the same Git object store, repository identity, signed membership, an
 - `.gitplus/knowledge/` is an OKF-compatible Markdown corpus with optional Git+ signed citations and structured Git evidence. Repository Memory is a small, regenerable session-start projection.
 - Retrieved content, knowledge, OTel attributes, and editorial verification remain data unless repository policy grants them authority.
 
+Automatic forwarding and webhooks are best effort: outages and restarts can lose
+deliveries. They do not replace backups. See the
+[delivery contract and reconciliation procedure](docs/operations.md#background-delivery-and-reconciliation).
+
 ### Documentation map
 
 Choose the document for the job rather than reading the design set front to back:
@@ -44,6 +48,7 @@ Choose the document for the job rather than reading the design set front to back
 | If you want to…                                                              | Start here                                               |
 | ---------------------------------------------------------------------------- | -------------------------------------------------------- |
 | install, run, or discover CLI commands                                       | [`docs/cli.md`](docs/cli.md) and `git+ <command> --help` |
+| install binaries, protect credential files, or recover damaged metadata      | [`docs/operations.md`](docs/operations.md)               |
 | understand repository identity, membership, PRs, reviews, checks, or policy  | [`docs/hub.md`](docs/hub.md)                             |
 | grant agents access or record agent sessions, tasks, and wake rules          | [`docs/agents.md`](docs/agents.md)                       |
 | operate or reason about the merge queue                                      | [`docs/queue.md`](docs/queue.md)                         |
@@ -312,6 +317,7 @@ npm run test:unit
 npm run test:integration
 
 # Pinned stock-Git and SEA compatibility suite
+npm run build:sea
 npm run test:interop
 
 # Everything
@@ -323,6 +329,10 @@ npm run build:sea
 # From any repository, using just the executable:
 /path/to/git+ serve --ui
 ```
+
+The build also emits `dist/sea/git-remote-git+id`, a symlink to the executable on
+Unix. Install both names to support `git+id://` remotes; the binary dispatches
+the helper protocol from its invoked name. See [installation](docs/operations.md#standalone-cli-installation).
 
 The SEA embeds the production UI and Fontsource fonts; it needs no adjacent
 `dist/ui`, Node installation, or npm packages. `serve --ui` uses the current
@@ -344,3 +354,5 @@ npm run docs:cli
 ```
 
 Documentation map: [`docs/readme.md`](docs/readme.md).
+
+For vulnerability reports, use the private channel in [the security policy](security.md).

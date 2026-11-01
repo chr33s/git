@@ -108,7 +108,14 @@ TOKEN=$(npx git+ credential my-repo \
   --capability repo.read,source.push \
   --ttl 3600)
 
-git clone "http://${TOKEN}@127.0.0.1:8080/my-repo"
+export GIT_AUTH_TOKEN="$TOKEN"
+git -c credential.helper= \
+  -c 'credential.http://127.0.0.1:8080.helper=!f() { if test "$1" = get; then printf "username=git\npassword=%s\n" "$GIT_AUTH_TOKEN"; fi; }; f' \
+  clone http://127.0.0.1:8080/my-repo
+cd my-repo
+git config credential.helper ''
+git config credential.http://127.0.0.1:8080.helper \
+  '!f() { if test "$1" = get; then printf "username=git\npassword=%s\n" "$GIT_AUTH_TOKEN"; fi; }; f'
 git push
 ```
 
@@ -117,6 +124,13 @@ never carry more capability than the agent's grant, it expires on its TTL,
 and revoking the member invalidates every credential it ever minted. Mint one
 per task at the start of the agent's session rather than storing a long-lived
 one — the private key is the durable secret, the credential is disposable.
+Keep the exported token only for the session and `unset GIT_AUTH_TOKEN TOKEN`
+when finished. The helper is scoped to the intended host and reads the token
+from the environment; the token is never stored in the remote URL or Git config.
+Use a credential helper for stock Git rather than embedding credentials in a
+URL: the Git/curl combination at the supported baseline can lose URL credentials
+between discovery and the subsequent request. Production remotes require HTTPS;
+the loopback HTTP address above is for local development.
 
 A credential minted for a _host_ also carries that host inside its signed
 bytes, and is refused anywhere else. That is what the credential helper mints
@@ -1430,7 +1444,13 @@ session trailer:
 ```sh
 TOKEN=$(npx git+ credential project --key ~/.ssh/agent-claude \
   --capability repo.read,source.push --ttl 3600)
-git clone "http://${TOKEN}@127.0.0.1:8080/project" work && cd work
+export GIT_AUTH_TOKEN="$TOKEN"
+git -c credential.helper= \
+  -c 'credential.http://127.0.0.1:8080.helper=!f() { if test "$1" = get; then printf "username=git\npassword=%s\n" "$GIT_AUTH_TOKEN"; fi; }; f' \
+  clone http://127.0.0.1:8080/project work && cd work
+git config credential.helper ''
+git config credential.http://127.0.0.1:8080.helper \
+  '!f() { if test "$1" = get; then printf "username=git\npassword=%s\n" "$GIT_AUTH_TOKEN"; fi; }; f'
 git switch -c claude/agent-keys
 
 # …edits…

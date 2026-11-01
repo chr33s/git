@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-30",
+  "kind": "local-cloudflare-backup-fence",
+  "sourceSha256": {
+    "src/host/Cloudflare.ts": "0dcafcb34a1d251b4043faf6e8818a0b55a9c1c50185e4eb866c60fbd618181e",
+    "src/host/CloudflareBackupFence.ts": "3315ed1bdee16c0152e0d858fb16f7c582613f3be12a2c8d664e814adc757b51",
+    "src/testing/BackupCodec.worker.ts": "862083154785e438d1e980708ce69394b2bdd68ed9b31682221be085c28accd3",
+    "src/host/BackupCodec.test.ts": "a7f80818573dec96bcc316027dd7e013d4533dd8c557a6f8f390039514edfcdb"
+  },
+  "nativeTests": {
+    "node24.12.0": {
+      "passed": 37,
+      "logSha256": "9599001d6395394152090d3945059ef1a05ffe459d159c33cb8244ca01966300"
+    },
+    "node26.10.0": {
+      "passed": 37,
+      "logSha256": "e9b30503c676ca468c8b1306378d539b7d038519f2355c093bae0fe680b8d917"
+    }
+  },
+  "actualWorker": {
+    "command": "node --trace-uncaught tools/verify-worker.ts",
+    "result": "passed",
+    "stage": "verify-worker-c4a812eb-4700-4bd4-9001-361841a7db70",
+    "logSha256": "701f72bfc903deda134df19e0c4f82d4a16ba9ef91b014f4e4324b30560e29c2",
+    "earlierAttempt": "terminated with ECONNRESET; terminal process confirmed before retry",
+    "moduleBytes": 1087682,
+    "moduleGzipBytes": 318221
+  },
+  "repositoryCheck": "passed",
+  "limits": [
+    "Per-object repository admission; no administrative production endpoint is exposed.",
+    "Hold/release exercised in the native fixture; full Worker rehearsal exercises normal host behavior.",
+    "No authenticated coordinator, global isolation, Artifacts writer gate, or deployed account qualification.",
+    "The fence does not block stateless edge reads or reconcile uncertain native writes."
+  ]
+}

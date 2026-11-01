@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-30",
+  "kind": "namespace-archive-preflight",
+  "sourceSha256": {
+    "tools/cloudflare-namespace-archive.ts": "081fa699f4ef754c9dc79dae8b31df44a52731cf8285dbf46cf0dc158ae8169b",
+    "tools/cloudflare-object-archive.ts": "488b70c4f0702ccc5c08b4ff01ebe061b838a7a45aa5f198351e2821fc833bb4",
+    "tools/cloudflare-backup-read.ts": "941a7300d948048f685a32e6f384f1babbf0259326de38ac89e76ff558476c76",
+    "tools/inventory-cloudflare-objects.ts": "edcf1eeda44541ab11bd89927270fb7749ae4bff8cb982843820144ea10bed54",
+    "src/host/BackupCodec.test.ts": "ae8f168b7dfb52c2d59555f302e8cebe540a9bf314194a2aba090ee9abd5873a",
+    "src/host/CloudflareInventory.test.ts": "041173557c679b96b2b7f9bfb3d8684a2dcb35e341217e335296db7ca35bd931",
+    "src/host/BackupAuthentication.test.ts": "369a5391858d8bba4235d34620c4dec1d9e5dfaef385fd05286e30e87cba4b9e"
+  },
+  "tests": {
+    "node24.12.0": {
+      "files": 3,
+      "passed": 24,
+      "logSha256": "7d111a1c38854d3a8fc15f91eb0605e0355a9f2cd5ee6d87d52c36a045880bf1"
+    },
+    "node26.10.0": {
+      "files": 3,
+      "passed": 24,
+      "logSha256": "47c7249a4ba87196ca497da93a630630394b393d0556c51c1ad38ab7bb303b1d"
+    }
+  },
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "9b51ed412855c45fba23aaa9d6affbd66f8da05c4f67ed119beea513f3c6a294"
+  },
+  "coverage": [
+    "Namespace signature checked against independently supplied signer and expected scope.",
+    "Exact ordered correspondence between verified discovery and namespace index.",
+    "Missing, duplicated, reordered and seal-mismatched index entries reject; a correctly signed duplicate index also rejects.",
+    "Every object archive authenticates all packets and completion against shared resource evidence and matches its indexed inventory/seal digest.",
+    "Damaged/symlinked namespace completion and missing object packets reject.",
+    "Shared bounded, non-following file readers preserve existing archive and discovery validation/recovery contracts."
+  ],
+  "limits": [
+    "Verifier performs no target RPC or R2 operations; current R2 contents require independent readback verification.",
+    "Discovery source is a local fixture, not proof of production enumeration completeness.",
+    "Global isolation, durable target mapping and namespace restore/release remain open.",
+    "No deployed account qualification or remote publication."
+  ]
+}

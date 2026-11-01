@@ -7,6 +7,8 @@ import foldkitRecommended from "@foldkit/oxlint-plugin/recommended.json" with { 
 import effectRecommended from "@effect/tsgo/oxlint-presets/recommended.json" with { type: "json" };
 import { defineConfig } from "vite-plus";
 
+import { stageWorkerAssets } from "./tools/stage-worker-assets.ts";
+
 const effectRules = Object.fromEntries(
   Object.entries(effectRecommended.rules).map(
     ([name, severity]): readonly [string, "error" | "warn"] => [
@@ -27,6 +29,30 @@ const foldkitRules = Object.fromEntries(
 
 const foldkitOff = Object.fromEntries(
   Object.keys(foldkitRecommended.rules).map((name): readonly [string, "off"] => [name, "off"]),
+);
+
+const antiSlopRules = {
+  "anti-slop/no-chained-type-assertions": "error",
+  "anti-slop/no-conditional-empty-object-spread": "error",
+  "anti-slop/no-known-value-widening": "error",
+  "anti-slop/no-module-mocking": "error",
+  "anti-slop/no-object-parameters": "error",
+  "anti-slop/no-reflect-apply": "error",
+  "anti-slop/no-reflect-get": "error",
+  "anti-slop/no-runtime-typeof": "error",
+  "anti-slop/no-shape-in-symbol-names": "error",
+  "anti-slop/no-unknown-parameters": "error",
+  "anti-slop/no-unknown-returns": "error",
+  "anti-slop/no-unknown-type-aliases": "error",
+  "anti-slop/no-unsafe-dictionary-type": "error",
+  "anti-slop/no-widen-then-assert": "error",
+  "anti-slop/require-safety-comment-for-type-assertion": "error",
+} as const;
+
+// The vendored plugin parses untyped rule options and AST input; its own
+// policy targets application code, not the linter's boundary.
+const antiSlopOff = Object.fromEntries(
+  Object.keys(antiSlopRules).map((name): readonly [string, "off"] => [name, "off"]),
 );
 
 /** Keep developer Git configuration out of subprocess-backed test results. */
@@ -102,6 +128,10 @@ export default defineConfig(({ mode }) => ({
         files: ["src/**/*.test.ts", "src/**/*.integration.ts"],
         rules: { "typescript/no-floating-promises": "off", ...foldkitOff },
       },
+      {
+        files: ["tools/oxlint/anti-slop/**"],
+        rules: antiSlopOff,
+      },
     ],
     rules: {
       ...effectRules,
@@ -124,22 +154,8 @@ export default defineConfig(({ mode }) => ({
       "effecttsgo/prefer-schema-over-json": "off",
       "effecttsgo/process-env": "off",
       "effecttsgo/process-env-in-effect": "off",
-      // Anti-slop rules
-      "anti-slop/no-chained-type-assertions": "error",
-      "anti-slop/no-conditional-empty-object-spread": "error",
-      "anti-slop/no-known-value-widening": "error",
-      "anti-slop/no-module-mocking": "error",
-      "anti-slop/no-object-parameters": "error",
-      "anti-slop/no-reflect-apply": "error",
-      "anti-slop/no-reflect-get": "error",
-      "anti-slop/no-runtime-typeof": "error",
-      "anti-slop/no-shape-in-symbol-names": "error",
-      "anti-slop/no-unknown-parameters": "error",
-      "anti-slop/no-unknown-returns": "error",
-      "anti-slop/no-unknown-type-aliases": "error",
-      "anti-slop/no-unsafe-dictionary-type": "error",
-      "anti-slop/no-widen-then-assert": "error",
-      "anti-slop/require-safety-comment-for-type-assertion": "error",
+      "effecttsgo/unstable-api-usage": "off",
+      ...antiSlopRules,
     },
   },
   // View branding rewrites return values and cannot cross Playwright's
@@ -149,6 +165,13 @@ export default defineConfig(({ mode }) => ({
       ? []
       : [
           ...foldkitPlugins,
+          {
+            name: "worker-assets",
+            apply: "build",
+            async writeBundle() {
+              await stageWorkerAssets(join(root, "dist/ui"), join(root, "dist/worker-assets"));
+            },
+          },
           {
             name: "font-licenses",
             generateBundle() {
@@ -183,6 +206,9 @@ export default defineConfig(({ mode }) => ({
           hookTimeout: 120_000,
           include: ["src/**/*.test.ts"],
           name: "unit",
+          // Native Git, browser, and forced-GC subprocesses share the host.
+          // Unbounded file concurrency can starve the upload-memory fixture.
+          maxWorkers: 4,
           testTimeout: 120_000,
         },
       },

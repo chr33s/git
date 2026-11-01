@@ -28,7 +28,12 @@
  */
 import { Effect } from "effect";
 
-import type { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
+import type {
+  Invalid,
+  ObjectNotFound,
+  RequestLimitExceeded,
+  StorageFailure,
+} from "../git/Error.ts";
 import { Repository } from "../git/Repository.ts";
 import * as Pack from "../context/Pack.ts";
 import type { Projection } from "../trust/Projection.ts";
@@ -138,7 +143,11 @@ const scored = (concept: Concept.Concept, words: ReadonlyArray<string>) => {
  */
 export const search = Effect.fn("knowledge.Recall.search")(function* (
   options: Options,
-): Effect.fn.Return<Recalled, Invalid | ObjectNotFound | StorageFailure, Repository> {
+): Effect.fn.Return<
+  Recalled,
+  Invalid | ObjectNotFound | RequestLimitExceeded | StorageFailure,
+  Repository
+> {
   const repository = yield* Repository;
   const words = terms(options.task);
   const bundle = (options.bundle ?? Concept.BUNDLE).replace(/\/+$/u, "");

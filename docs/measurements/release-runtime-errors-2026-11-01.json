@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-01",
+  "kind": "release-reporter-runtime-failure-gate",
+  "sourceSha256": {
+    "tools/release-test-reporter.ts": "33e6dfa98cbcf2fd966c6a0ee54399019e342ce18372f84e39b97801ce64643c",
+    "src/cli/ReleaseCoverage.interop.test.ts": "bd738f789fa5d33dbdd2296d074092e514633084af4ce4cf5db08e6b6b82a231"
+  },
+  "tests": {
+    "node26.10.0": {
+      "files": 1,
+      "passed": 9,
+      "skipped": 0,
+      "strictReporter": true,
+      "logSha256": "a238bde5b33ac882e316f9248ad9985685a2163aa041e5ca9cf41999c72a4ad7"
+    },
+    "node24.12.0": {
+      "files": 1,
+      "passed": 9,
+      "skipped": 0,
+      "strictReporter": true,
+      "logSha256": "e2b0ee20ff200194f44901704b720d192f84246211e8848a507bdec8cc6a4475"
+    }
+  },
+  "repositoryCheck": {
+    "exitCode": 0,
+    "logSha256": "3b32ab977ccf78ce70c048840ca050f5e778f05fa47767a921db95b88a8e1d46"
+  },
+  "verified": [
+    "Real child Vitest run succeeds only when tests and runtime succeed",
+    "Skipped, TODO, dynamic skip, mixed execution and empty suites remain rejected",
+    "Passing test plus unhandled rejection exits nonzero without success verdict",
+    "dangerouslyIgnoreUnhandledErrors cannot bypass reporter rejection",
+    "Passing test plus failed afterAll hook exits nonzero without success verdict"
+  ],
+  "limitations": [
+    "Interrupted-run reason is rejected in implementation but not separately exercised by these subprocess fixtures",
+    "No expanded remote release matrix or final distributable qualification performed"
+  ]
+}

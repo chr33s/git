@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "base": "54c6199b79d3b121ad7964ac8d0edaeba85b4666",
+  "commit": "212bc3dfdf9def589e0a75f65254205fd03d0454",
+  "branch": "codex/production-release-review-20261101",
+  "files": 812,
+  "snapshotSha256": "2083cc443a77a93c34096201471b3fe7257cd2a743b09472ba06dbaacfcb9061",
+  "originalIndexUnchanged": true,
+  "originalHeadUnchanged": true,
+  "cleanSnapshot": true,
+  "scope": "All current tracked and nonignored untracked files, including previously staged changes",
+  "published": false,
+  "patchSha256": "cc5ded1d4a80bc17fe0fa744293d3ec5fb9810bfa589a48af1e640328fbe525d",
+  "bundleSha256": "c423c72254258ac7477861643a58d2b6d5570679fe088f079f3266a22b939657",
+  "kind": "local-review-snapshot-awaiting-publication-decision",
+  "retainedDirectory": "dist/rehearsals/ci-review-20261101-87gp9osj",
+  "review": "review.md",
+  "scopeWarning": "Includes all previously staged and unstaged changes, not only files edited in the latest turn",
+  "limitations": [
+    "Snapshot is not pushed and has no remote CI run",
+    "Full dual-Node test baseline predates capture-intent/abandonment changes; those have focused/native Worker verification",
+    "No final release tag, distribution signing or production deployment"
+  ]
+}

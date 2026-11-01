@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-30",
+  "kind": "local-native-artifacts-sql-recovery",
+  "sourceSha256": {
+    "src/host/BackupCodec.test.ts": "7b2268e8a84c34873701e35c6e3e2b16dcee139dbc2b3dbe4e261daa588d610d",
+    "src/testing/BackupCodec.worker.ts": "4b739ce1c4f69de554a6a1d1dcc0735e6b8156af914a826dd1bccd718b952737",
+    "src/testing/BackupArtifacts.worker.ts": "1c13fc37229b991d60f76ee1974d603aaf1aa5ea4ffcb6dc99c022936e9e3d51",
+    "src/artifacts/Sqlite.ts": "5226717585a902b51f8458f50b9528dcff431a121868767c76a3bc7de607b119",
+    "tools/cloudflare-sql-backup.ts": "ec1ee5c7944682281a50929e94b59dd3c6373113de79cb8d642ebf59e04b6849",
+    "tools/cloudflare-sql-restore.ts": "959370164992fa1acc6a0436d48fa2e62a24ef64ebd1e127124da7e1db2b41f4"
+  },
+  "verification": {
+    "node24.12.0": {
+      "passed": 2,
+      "logSha256": "dda3c32f8d1a7c8b1f735c00717e22a1014920f38c67ab615954e73bc2d5f4bf"
+    },
+    "node26.10.0": {
+      "passed": 2,
+      "logSha256": "023b6d1881fcf56a729344432f4802f3889fd9dc3f3ce01dc1e57411d5855511"
+    },
+    "repositoryCheck": "passed"
+  },
+  "coverage": [
+    "Real registry/tokens SQL services, two repositories and four credential states.",
+    "SQL capture/import into a fresh Durable Object followed by actual eviction.",
+    "Read/write scopes, revoked/expired rejection, wrong-repository rejection.",
+    "Repository identity, metadata and pending-fork state preserved.",
+    "Backup pages exclude generated plaintext credentials.",
+    "A new revocation survives another eviction without affecting the source."
+  ],
+  "limits": [
+    "No deployed account, authenticated coordinator or production writer barrier.",
+    "Tests SQL state, not namespace HTTP authorization or fork object resolution.",
+    "Credentials are local-only dummy values held by the test; no real credentials exported."
+  ]
+}

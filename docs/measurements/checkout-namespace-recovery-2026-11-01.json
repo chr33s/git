@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-01",
+  "kind": "native-checkout-namespace-recovery",
+  "git": "git version 2.56.0",
+  "platform": "darwin-arm64",
+  "sourceSha256": {
+    "src/testing/BackupApplication.worker.ts": "8da7f2482ac0d847fd388c272926443bc2f8398979d1bfa4a9007582217dfb33",
+    "src/host/BackupRecovery.interop.test.ts": "bfb74df08ac9a04a5280cc7d8a4f562f5442ae884ef0a7013a7e913008a707f9"
+  },
+  "tests": {
+    "node24.12.0": {
+      "files": 2,
+      "passed": 3,
+      "skipped": 0,
+      "strictReporter": true,
+      "logSha256": "d2b67151c346fd06919be2d8997a0064cef8a72d30135fc1951d4fc9b7732fc9"
+    },
+    "node26.10.0": {
+      "files": 2,
+      "passed": 3,
+      "skipped": 0,
+      "strictReporter": true,
+      "logSha256": "3be5be1a82416cc5909fe963ce42c81cc7409ddcc81b8ab10c343c7ab4d4a1ab"
+    }
+  },
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "fca2429f826599802dfcb412a1b602a971ebeee8a17bd02574e41438c1dcc6f6"
+  },
+  "coverage": [
+    "Namespace capture and fresh-storage restore preserve a nonempty working tree alongside signed hub, LFS and authorization state.",
+    "Stock Git 2.56.0 clones and checks out restored R2 objects after target eviction.",
+    "Exact Unicode text, executable script and nested binary bytes match independently specified expectations.",
+    "Symlink target, executable and nonexecutable file permissions, and clean Git status are checked before release.",
+    "Existing pack, strict fsck, shallow, ref, object-byte and hub-projection assertions remain active."
+  ],
+  "limits": [
+    "Local native Cloudflare emulator fixture only; no deployed account or installation-wide isolation proof.",
+    "The representative commit is still a shallow root; this is not comprehensive history or production-scale recovery qualification.",
+    "Operator workflows, production recovery targets and supported-platform release qualification remain open."
+  ]
+}

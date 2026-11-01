@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "measuredAt": "2026-10-30T09:35:52.219Z",
+  "kind": "local-worker-bundle",
+  "compression": "sum of independently gzip-compressed modules, zlib level 9",
+  "bytes": 1084750,
+  "gzipBytes": 317397,
+  "modules": [
+    {
+      "name": "process-D77oA2Mj.js",
+      "bytes": 7727,
+      "gzipBytes": 2584,
+      "sha256": "2c61d58723565f1b0001d7302a0c9afa604c1065ce778635e64a08e059171f85"
+    },
+    {
+      "name": "rolldown-runtime-BdAlPI6C.js",
+      "bytes": 1493,
+      "gzipBytes": 798,
+      "sha256": "a9fab4e71913e89808596a89ed754ae7824f05588ac8890a728c858c386bda4f"
+    },
+    {
+      "name": "tty-f2uVVrQA.js",
+      "bytes": 1495,
+      "gzipBytes": 663,
+      "sha256": "e8c4ae211a08774e5a837bc95ada0d1e3221362b1e4a17e4159b9b4c4d74f183"
+    },
+    {
+      "name": "worker.js",
+      "bytes": 1074035,
+      "gzipBytes": 313352,
+      "sha256": "052629407a019a0dd90aa88669febd0a331c76468e7352e463f30de732cdc727"
+    }
+  ],
+  "excludedSourceMaps": ["process-D77oA2Mj.js.map", "tty-f2uVVrQA.js.map", "worker.js.map"],
+  "limitsOfEvidence": "Actual local Alchemy Worker build; excludes static assets, source maps and upload multipart metadata. Not a production upload receipt, account-limit check, startup CPU or runtime memory measurement."
+}

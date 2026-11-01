@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-01",
+  "kind": "current-complete-strict-source-and-standalone-rehearsal",
+  "buildInfo": {
+    "schemaVersion": 1,
+    "version": "0.1.1",
+    "revision": "54c6199b79d3b121ad7964ac8d0edaeba85b4666",
+    "dirty": true,
+    "node": "26.10.0",
+    "platform": "darwin",
+    "arch": "arm64",
+    "packageLockSha256": "5ec892c20a774622885a7b8400be409fae7f3b2d14c038c924f570eb8773d1f9"
+  },
+  "source": {
+    "files": 695,
+    "sha256": "f1844dab7a6033303500e0b0f0bc455c2e9961f34432eca58329d35ebc9b2056",
+    "fingerprintMethod": "Unique sorted git ls-files --cached --others --exclude-standard paths under src, tools, patches, package.json, package-lock.json, tsconfig.json, vite.config.ts and .github; SHA-256 over each path, NUL, file bytes, NUL.",
+    "unchangedAfterBothRuns": true
+  },
+  "standalone": {
+    "bytes": 163310672,
+    "sha256": "e2c98a89362500f2cde13a39d122a3315a8e58e8723d0b566b757d0cc8ad7599",
+    "path": "dist/sea/git+",
+    "unchangedAfterBothRuns": true,
+    "adHocCodesignVerificationPassed": true,
+    "buildLogSha256": "0a9ed17b4f2ddbbd15dfbaf570f22918afc9d131f2a50dcd86d2be3e3da56401"
+  },
+  "tests": {
+    "node24.12.0": {
+      "files": 274,
+      "passed": 2810,
+      "documentedMacOsSkips": 11,
+      "unexpectedSkips": 0,
+      "unhandledErrors": 0,
+      "durationSeconds": 519.56,
+      "strictReporter": true,
+      "logSha256": "c450f69270a9c790e1f230a53d5ef7a817321ce6d864b847dad4a99b224308b0",
+      "preflightPassed": true,
+      "preflightLogSha256": "998a049617d74b300aa1a93b97d33ecc190438069bf4f99a85659b5f2de29d78"
+    },
+    "node26.10.0": {
+      "files": 274,
+      "passed": 2810,
+      "documentedMacOsSkips": 11,
+      "unexpectedSkips": 0,
+      "unhandledErrors": 0,
+      "durationSeconds": 508.62,
+      "strictReporter": true,
+      "logSha256": "2ead5386b3fc7d50d9be332e255960b443234bd2acaac4b45b7f516706fa9b0e",
+      "preflightPassed": true,
+      "preflightLogSha256": "016b4abe7e86b60c226d0d03c33ad371c742f9e705cc6ae9a084469587ba875a"
+    }
+  },
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "d4b5eaf078a40f2c95b9f929d7ab9508cfe27474a504b2affc288316e68cc2f8"
+  },
+  "coverage": [
+    "Complete unit, native Cloudflare integration and interoperability projects",
+    "All five authenticated stock-Git tests on both Node drivers",
+    "Explicit backup CLI, private connection preflight, signed recovery and nonempty R2 process-death tests",
+    "Miniflare interrupted-stream cleanup and strict reporter runtime-error regressions",
+    "Standalone helper, server/UI, Git command parity, installation and local source/data recovery tests"
+  ],
+  "limits": [
+    "Dirty local worktree; not a clean tagged release or remote expanded CI matrix",
+    "Both drivers use the same executable with embedded Node 26.10.0 on macOS arm64",
+    "Deployed Cloudflare limits, policy, production recovery and operational acceptance remain open",
+    "Final supported-platform distributables, publication provenance/signing and distribution rehearsals remain open"
+  ]
+}

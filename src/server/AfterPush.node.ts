@@ -24,11 +24,14 @@ import { file as subscribersFile } from "./Subscribers.node.ts";
 import * as Subscribers from "./Subscribers.ts";
 import * as Wake from "./Wake.node.ts";
 import * as Webhooks from "./Webhooks.ts";
+import { Transport } from "../client/Transport.ts";
 
 export interface ChainOptions {
   /** Directory holding one bare repository per subdirectory. */
   readonly root: string;
   readonly repo: string;
+  /** Network policy supplied by a host; standalone CLI callers use native fetch. */
+  readonly transport?: typeof globalThis.fetch;
   /**
    * Whether landing a ref also runs this repository's wake rules.
    *
@@ -93,15 +96,31 @@ export const chain = (options: ChainOptions): Layer.Layer<GitRepository.Hooks> =
     Effect.gen(function* () {
       const subscribed = yield* Subscribers.Subscribers;
       const client = yield* HttpClient.HttpClient;
+      const transport = options.transport;
+      const deliveryClient =
+        transport === undefined
+          ? client
+          : client.pipe(
+              HttpClient.transformResponse(Effect.provideService(FetchHttpClient.Fetch, transport)),
+            );
       const registry = yield* Remotes.Remotes;
       return GitRepository.hooksAll([
-        Webhooks.service({ subscribers: subscribed, client, options: { background } }),
+        Webhooks.service({
+          subscribers: subscribed,
+          client: deliveryClient,
+          options: { background },
+        }),
         // The repository a forward pushes from is built when the push lands,
         // not when this layer is: it cannot be a dependency of the hooks the
         // repository itself depends on.
         Sending.service({
           remotes: registry,
-          using: (effect) => effect.pipe(Effect.provide(unhooked(directory))),
+          using: (effect) => {
+            const ready = effect.pipe(Effect.provide(unhooked(directory)));
+            return transport === undefined
+              ? ready
+              : ready.pipe(Effect.provideService(Transport, { fetch: transport }));
+          },
           options: { background },
         }),
         ...(options.wake === true ? [Wake.service(directory, options.repo, { background })] : []),

@@ -3,7 +3,8 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
 import { afterEach, beforeEach, it } from "@effect/vitest";
-import { Effect, Layer } from "effect";
+import { Deferred, Effect, Fiber, Layer } from "effect";
+import { TestClock } from "effect/testing";
 import * as Node from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { Repository } from "../git/Repository.ts";
@@ -232,26 +233,31 @@ for (const failure of ["timeout", "oversized"] as const) {
   );
 }
 
-it.live(
+it.effect(
   "the pass deadline checkpoints unfinished publication and a resumed pass reuses interpretation",
   () =>
-    Effect.promise(async () => {
-      const f = await execute(knowledgeFixture(true));
+    Effect.gen(function* () {
+      const f = yield* Effect.promise(() => execute(knowledgeFixture(true)));
       const key = path.join(root, "publisher-key");
-      await fs.writeFile(key, opensshPrivateKey(f.root, "publisher@example.com"), { mode: 0o600 });
-      await configure(
-        `${readInput} process.stdout.write(${JSON.stringify(JSON.stringify(f.output))});`,
-        key,
-        f.evidence.actors,
+      yield* Effect.promise(() =>
+        fs.writeFile(key, opensshPrivateKey(f.root, "publisher@example.com"), { mode: 0o600 }),
       );
+      yield* Effect.promise(() =>
+        configure(
+          `${readInput} process.stdout.write(${JSON.stringify(JSON.stringify(f.output))});`,
+          key,
+          f.evidence.actors,
+        ),
+      );
+      const publishing = yield* Deferred.make<void>();
       const blocked = Repository.of({
         ...repository,
         setRef: (input) =>
           input.name.startsWith("refs/heads/agent-memory/")
-            ? Effect.never
+            ? Deferred.succeed(publishing, undefined).pipe(Effect.andThen(Effect.never))
             : repository.setRef(input),
       });
-      const partial = await Effect.runPromise(
+      const running = yield* Effect.forkScoped(
         Host.run({
           directory,
           sourceRef: "refs/heads/main",
@@ -260,18 +266,27 @@ it.live(
           propose: true,
         }).pipe(Effect.provideService(Repository, blocked)),
       );
+      // Advance the deadline only after interpretation has reached publication;
+      // filesystem/process scheduling must not choose which stage times out.
+      yield* Deferred.await(publishing);
+      yield* TestClock.adjust(2000);
+      const partial = yield* Fiber.join(running);
       assert.equal(partial.exitCode, 2);
       assert.equal(partial.job.publication, "pending");
       assert.equal(partial.job.assistance.state, "complete");
       assert.ok(partial.job.candidate);
       const ref = `refs/heads/agent-memory/${partial.job.candidate}`;
-      assert.equal(await execute(repository.readRef(ref)), null);
-      const completed = await execute(Host.run({ directory, job: partial.job.id, propose: true }));
+      assert.equal(yield* repository.readRef(ref), null);
+      const completed = yield* Host.run({ directory, job: partial.job.id, propose: true }).pipe(
+        Effect.provideService(Repository, repository),
+      );
       assert.equal(completed.exitCode, 0);
       assert.equal(completed.job.publication, "written");
       assert.equal(completed.job.candidate, partial.job.candidate);
       assert.equal(
-        (await execute(Session.project(`memory-${partial.job.candidate}`))).commits.length,
+        (yield* Session.project(`memory-${partial.job.candidate}`).pipe(
+          Effect.provideService(Repository, repository),
+        )).commits.length,
         2,
       );
     }),

@@ -21,6 +21,7 @@ import { Context, Effect, Layer, Option, Result, Schema } from "effect";
 import { parsePrivateKey } from "../crypto/SshSignature.ts";
 import { Invalid, StorageFailure } from "../git/Error.ts";
 import type { Sql } from "../git/Sql.ts";
+import * as RegistryCapacity from "./RegistryCapacity.ts";
 import { outboundUrl } from "../text.ts";
 import { DELEGATION_PREFIX } from "./Auth.ts";
 
@@ -314,7 +315,7 @@ interface Row extends Record<string, string | number | null> {
  * it got into the database — and unreadable has to mean `manual`, which is
  * the behaviour a repository that never configured one already has.
  */
-const StoredSync = Schema.Struct({
+export const StoredSync = Schema.Struct({
   mode: Schema.Literals(MODES),
   refs: Schema.Array(Schema.String),
 });
@@ -347,7 +348,11 @@ const rowOf = (row: Row): Remote => ({
  * input gate serializes writes to it for the same reason it serializes
  * `RefStore.apply`.
  */
-export const sql = (db: Sql, repo: string): Layer.Layer<Remotes> =>
+export const sql = (
+  db: Sql,
+  repo: string,
+  capacity: RegistryCapacity.Limits = RegistryCapacity.defaults,
+): Layer.Layer<Remotes> =>
   Layer.sync(Remotes, () => {
     // Keyed by repo and name together: one Durable Object holds one
     // repository in practice, but the stores are keyed by name and this
@@ -377,7 +382,9 @@ export const sql = (db: Sql, repo: string): Layer.Layer<Remotes> =>
     }
 
     const failed = (operation: string) => (cause: unknown) =>
-      new StorageFailure({ operation, path: `remotes/${repo}`, cause });
+      cause instanceof StorageFailure
+        ? cause
+        : new StorageFailure({ operation, path: `remotes/${repo}`, cause });
 
     const one = (name: string) =>
       Effect.try({
@@ -406,20 +413,25 @@ export const sql = (db: Sql, repo: string): Layer.Layer<Remotes> =>
           return yield* Effect.try({
             try: () => {
               const remote = remoteOf(input);
-              db.exec(
-                `INSERT INTO remotes (repo, name, url, credential, key, sync, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+              RegistryCapacity.insert(
+                db,
+                "remotes",
                 repo,
-                remote.name,
-                remote.url,
-                remote.credential,
-                remote.key,
-                remote.sync === null ? null : JSON.stringify(remote.sync),
-                remote.createdAt.toISOString(),
+                [
+                  repo,
+                  remote.name,
+                  remote.url,
+                  remote.credential,
+                  remote.key,
+                  remote.sync === null ? null : JSON.stringify(remote.sync),
+                  remote.createdAt.toISOString(),
+                ],
+                capacity,
               );
               return remote;
             },
             catch: failed("remotes.add"),
-          });
+          }).pipe(Effect.tapError(RegistryCapacity.report("remotes")));
         }),
       remove: (name) =>
         Effect.try({

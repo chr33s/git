@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-01",
+  "kind": "target-coordinator-process-death",
+  "platform": "darwin-arm64",
+  "sourceSha256": {
+    "src/testing/BackupProcess.ts": "e5fcaa6f69e655921ec478503b292f42ff88fa85f0180f4df9c4030f634a59ef",
+    "src/testing/BackupCodec.worker.ts": "946451892b6489e1bd355162201f323693874ceb76f60376f602c0f17e106b13",
+    "src/host/SourceRelease.process.test.ts": "0c4c74a3bc78bff4afe2c377f73d2d24d9bda3106bd825d5bb571cf268eb8fcd",
+    "src/host/TargetRecovery.process.test.ts": "b9fa4694538f777c2ec3dab98601ed938db96a15ab2e02ae6098eefea129bc7c",
+    "tools/cloudflare-namespace-restore.ts": "1b30e4617b4286a6f55526e69063f1b4fb76304f41f99fa5e5c7c5d168cc7523",
+    "tools/cloudflare-namespace-release.ts": "a268d76daa262a7f0402ae505390005002c83a2f6eb5a39edcd47634e99fec27"
+  },
+  "tests": {
+    "node24.12.0": {
+      "files": 5,
+      "passed": 27,
+      "skipped": 0,
+      "strictReporter": true,
+      "logSha256": "43cc5f22daf0ad43bfb720755c642c4cb33ae4fc1883c4c96164c295fca3cd82"
+    },
+    "node26.10.0": {
+      "files": 5,
+      "passed": 27,
+      "skipped": 0,
+      "strictReporter": true,
+      "logSha256": "216438751f2ba92ffd7dbbcafc80266b991d5ac2fc11478138a56de0d00b9893"
+    }
+  },
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "98d77de47b3cd8d1a428425f6363664674211b2585e52f0133dad3af9ee2c0f4"
+  },
+  "coverage": [
+    "Actual namespace restore coordinator is killed after remote Apply and Finish success before acknowledgement, and before the second object after the first receipt is journaled.",
+    "Actual target release coordinator is killed after remote Retire and Release success before acknowledgement, and before the next object after each acknowledgement is journaled.",
+    "Every interrupted journal is reopened with integrity_check and exact phase/receipt/progress expectations.",
+    "Fresh child processes resume after native target eviction; SQL blobs and typed/cyclic KV match source data before release.",
+    "Release verification-report digest is supplied only after data comparison while targets remain fenced.",
+    "Release retries issue no Hold, Start, Apply or Finish calls; committed release is skipped.",
+    "Terminal retries make no bucket or RPC calls and preserve a later hold; sources remain fenced.",
+    "Shared loopback bridge also runs the three existing actual source coordinator SIGKILL cases."
+  ],
+  "limits": [
+    "Two native objects with nonempty SQL/KV but empty R2 bucket; no R2 transfer process-death qualification.",
+    "Loopback fixture transport is not configured remote production administration.",
+    "No production-scale workload, global isolation, deployed Cloudflare or power-loss qualification."
+  ]
+}

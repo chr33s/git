@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-01",
+  "kind": "durable-captured-source-release",
+  "platform": "darwin-arm64",
+  "sourceSha256": {
+    "tools/cloudflare-source-release.ts": "7b9aaf5897b8aedc91e32a144d65bad6db721a0f05bbea99c9ba2164d0a4c7c0",
+    "tools/cloudflare-restore-journal.ts": "9436dc026bda1e243ad974faabd98fe347e5397c5f477edd796365e2ad4973a6",
+    "src/host/BackupRecovery.interop.test.ts": "74826aca73289313411f9433f315b43bf6964d25b03428f9ef8e7b0da81d2a31",
+    "src/host/RestoreJournal.process.test.ts": "01864ba1a06d4bad0716598865d86d4b85ac79d1f3be0f5b1be423cba370f5d4"
+  },
+  "tests": {
+    "node24.12.0": {
+      "files": 3,
+      "passed": 17,
+      "skipped": 0,
+      "strictReporter": true,
+      "logSha256": "fa7be42890760c4222a3f90fe225db6602c70e9596effcc185a644a6b177fae5"
+    },
+    "node26.10.0": {
+      "files": 3,
+      "passed": 17,
+      "skipped": 0,
+      "strictReporter": true,
+      "logSha256": "13a18bf7cc2073ae5e6fabac919acaf6a1df7472cc00ccacf999481a65c58db6"
+    }
+  },
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "b093927cb869dc80c1ef99d98604a788eb2a1e7e9ed7b69a7921afb2cd4563ac"
+  },
+  "coverage": [
+    "Source release authenticates the namespace archive and copied R2 contents before release intent and RPC.",
+    "Target release journals and extra archive-bucket objects are rejected before source RPC.",
+    "Lost successful Release acknowledgement survives source eviction and retries idempotently.",
+    "Unexpected Release response leaves progress incomplete; subsequent retries skip previously recorded source releases.",
+    "Impossible journal progress ordering is rejected before RPC.",
+    "Completed retry makes no source RPC and preserves a later snapshot hold.",
+    "Existing native archive/recovery and 14 shared SQLite journal process-death/path tests also pass."
+  ],
+  "limits": [
+    "Programmatic coordinator only; configured remote operator transport and global isolation are still operator responsibilities.",
+    "This operation resumes sources after complete successful capture; it does not abandon partial captures or release restored targets.",
+    "Shared journal process-death tests cover storage primitives and target release boundaries, not SIGKILL of the new source coordinator at every remote boundary.",
+    "No deployed Cloudflare qualification, power-loss test or production-scale recovery claim."
+  ]
+}

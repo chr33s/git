@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { describe, it } from "@effect/vitest";
 import { deflateSync } from "node:zlib";
 
@@ -13,6 +13,7 @@ import {
   createDelta,
   encodeOfsDistance,
   ingest,
+  ImportBudget,
   MAX_OBJECT_BYTES,
   maxObject,
   pack,
@@ -89,6 +90,95 @@ const hexBytes = (hex: string): number[] => {
   for (let at = 0; at < hex.length; at += 2) bytes.push(Number.parseInt(hex.slice(at, at + 2), 16));
   return bytes;
 };
+
+describe("aggregate pack import budgets", () => {
+  it.effect.each([1, 256 * 1024])(
+    "imports tiny transport chunks across buffer boundaries, retention=%s",
+    (retainUpTo) =>
+      Effect.gen(function* () {
+        const object: RawObject = { type: "blob", data: new Uint8Array(randomBytes(70_000)) };
+        const bytes = buildPack([
+          concat([Uint8Array.from(objectHeader(3, object.data.length)), deflateSync(object.data)]),
+        ]);
+        const imported = yield* ingest(Stream.fromIterable(chunked(bytes, 7)), {
+          retainAtLeast: 1,
+          retainUpTo,
+        });
+        assert.deepEqual(imported, [oidOf(object)]);
+        const store = yield* ObjectStore;
+        const oid = imported[0];
+        assert.ok(oid !== undefined);
+        assert.deepEqual((yield* store.read(oid)).data, object.data);
+      }).pipe(Effect.provide(stores)),
+  );
+  it.effect("rejects a fragmented excessive-count header without reading the pack body", () =>
+    Effect.gen(function* () {
+      const bytes = buildPack([]).subarray(0, 12);
+      new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).setUint32(8, 100_001);
+      let pulled = 0;
+      const source = Stream.fromAsyncIterable(
+        (async function* () {
+          for (const byte of bytes) {
+            pulled++;
+            yield Uint8Array.of(byte);
+          }
+          throw new Error("the import must reject before consuming the body");
+        })(),
+        (cause) => cause,
+      );
+      const error = yield* ingest(source).pipe(Effect.flip);
+      assert.equal(error._tag, "PackCorrupt");
+      assert.match(error.reason, /declares 100001 objects, limit 100000/);
+      assert.equal(pulled, 12);
+    }).pipe(Effect.provide(stores)),
+  );
+  for (const mode of ["unpack", "retain", "stream"] as const) {
+    const importPack = (bytes: Uint8Array) =>
+      mode === "unpack"
+        ? unpack(Stream.make(bytes))
+        : ingest(Stream.make(bytes), {
+            retainAtLeast: 1,
+            retainUpTo: mode === "stream" ? 1 : 1024,
+          });
+
+    it.effect(`rejects excessive object count before writing (${mode})`, () =>
+      Effect.gen(function* () {
+        const store = yield* ObjectStore;
+        const object: RawObject = { type: "blob", data: encoder.encode("small") };
+        const entry = concat([Uint8Array.from(objectHeader(3, 5)), deflateSync(object.data)]);
+        const error = yield* importPack(buildPack([entry, entry])).pipe(
+          Effect.provideService(ImportBudget, { objects: 1, expandedBytes: 100 }),
+          Effect.flip,
+        );
+        assert.equal(error._tag, "PackCorrupt");
+        assert.match(error.reason, /declares 2 objects, limit 1/);
+        assert.equal(yield* store.has(oidOf(object)), false);
+      }).pipe(Effect.provide(stores)),
+    );
+
+    it.effect(`charges duplicate expanded bytes before inflating (${mode})`, () =>
+      Effect.gen(function* () {
+        const entry = concat([
+          Uint8Array.from(objectHeader(3, 5)),
+          deflateSync(encoder.encode("small")),
+        ]);
+        // The second entry has no valid compressed data. Aggregate size must
+        // refuse its declared size before the inflater touches that data.
+        const second = Uint8Array.from(objectHeader(3, 5));
+        const error = yield* importPack(buildPack([entry, second])).pipe(
+          Effect.provideService(ImportBudget, { objects: 2, expandedBytes: 9 }),
+          Effect.flip,
+        );
+        assert.equal(error._tag, "PackCorrupt");
+        assert.match(error.reason, /expanded bytes exceed 9/);
+        const accepted = yield* importPack(buildPack([entry, entry])).pipe(
+          Effect.provideService(ImportBudget, { objects: 2, expandedBytes: 10 }),
+        );
+        assert.equal(accepted.length, 2);
+      }).pipe(Effect.provide(stores)),
+    );
+  }
+});
 
 describe("applyDelta bounds", () => {
   it.effect("refuses a delta that claims more than it could hold", () =>
@@ -404,6 +494,22 @@ describe("Pack", () => {
       ]);
       return buildPack([baseEntry, deltaEntry]);
     };
+
+    it.effect.each([false, true])(
+      "charges delta targets against aggregate expansion, retained=%s",
+      (retained) =>
+        Effect.gen(function* () {
+          const bytes = amplified(2);
+          const error = yield* (
+            retained ? ingest(Stream.make(bytes), { retainAtLeast: 1 }) : unpack(Stream.make(bytes))
+          ).pipe(
+            Effect.provideService(ImportBudget, { objects: 2, expandedBytes: 150_000 }),
+            Effect.flip,
+          );
+          assert.equal(error._tag, "PackCorrupt");
+          assert.match(error.reason, /expanded bytes exceed 150000/);
+        }).pipe(Effect.provide(stores)),
+    );
 
     it.effect("refuses a delta whose result is past the ceiling", () =>
       Effect.promise(async () => {

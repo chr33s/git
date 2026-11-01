@@ -1,0 +1,15 @@
+diff --git a/node_modules/miniflare/dist/src/index.js b/node_modules/miniflare/dist/src/index.js
+index 114ef34..c4ebf06 100644
+--- a/node_modules/miniflare/dist/src/index.js
++++ b/node_modules/miniflare/dist/src/index.js
+@@ -92351,7 +92351,9 @@ function prefixStream(prefix, stream) {
+     writer.releaseLock();
+     return stream.pipeTo(identity.writable);
+   }).catch((error123) => {
+-    return writer.abort(error123);
++    // pipeTo owns cleanup after the original writer releases its lock.
++    // An aborted input must not produce an unhandled detached-writer rejection.
++    return identity.writable.locked ? writer.abort(error123) : identity.writable.abort(error123);
+   });
+   return identity.readable;
+ }

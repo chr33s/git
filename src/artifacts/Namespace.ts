@@ -45,6 +45,14 @@ import {
 import { bytesToHex } from "../git/Format.ts";
 import { checkRefName, ObjectStore, RefStore } from "../git/Store.ts";
 import { make as registryFile } from "./RegistryFile.node.ts";
+import { make as tokenFile } from "./TokenFile.node.ts";
+import {
+  sync as syncRegistry,
+  replace as replaceMetadata,
+  remove as removeMetadata,
+} from "./MetadataFile.node.ts";
+import * as MetadataCapacity from "./MetadataCapacity.node.ts";
+import { prepare as prepareFork } from "./ForkCapacity.node.ts";
 import { reserve as reserveFiles } from "./Lifecycle.node.ts";
 
 /**
@@ -218,43 +226,20 @@ export const registryMemory = Layer.sync(Registry)(() =>
   makeRegistry(new Map(), () => Effect.void),
 );
 
-/** The documents this provider keeps on disk: registry rows, token rows, fork links. */
-type PersistedDocument =
-  | ReadonlyArray<RepoRecord>
-  | ReadonlyArray<TokenRow>
-  | Record<string, string>;
-
 /** Ordered atomic replacements for one provider's metadata file. */
 const jsonWriter = (target: string) => {
   let pending = Promise.resolve();
-  return async (value: PersistedDocument): Promise<void> => {
+  return async (value: Record<string, string>): Promise<void> => {
     // Capture this mutation before another caller changes a shared row array.
     const contents = JSON.stringify(value, null, 1);
     const written = pending.then(async () => {
-      await fs.mkdir(path.dirname(target), { recursive: true });
-      const temporary = `${target}.${crypto.randomUUID()}.tmp`;
-      await fs.writeFile(temporary, contents);
-      await fs.rename(temporary, target);
+      await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+      await replaceMetadata(target, contents);
     });
     // The caller sees its failure; later writes can still repair persistence.
     pending = written.catch(() => undefined);
     await written;
   };
-};
-
-const Persisted = Schema.fromJsonString(Schema.Unknown);
-
-const loadJson = async <A>(target: string): Promise<A | null> => {
-  try {
-    const parsed = Schema.decodeResult(Persisted)(await fs.readFile(target, "utf8"));
-    if (Result.isFailure(parsed)) return null;
-    // SAFETY: these files are written only by `jsonWriter`, so a successful
-    // parse yields the caller's persisted shape; anything unreadable lands in
-    // the catch and reads as an empty store.
-    return parsed.success as A;
-  } catch {
-    return null;
-  }
 };
 
 /** The durable form: one JSON file, rows revived with their `Date`s. */
@@ -274,9 +259,12 @@ export class Tokens extends Context.Service<
       scope: "read" | "write",
       ttlSeconds: number,
     ) => Effect.Effect<ArtifactsCreateTokenResult, ArtifactsError>;
-    readonly list: (repo: string) => Effect.Effect<ArtifactsTokenListResult>;
-    readonly revoke: (repo: string, tokenOrId: string) => Effect.Effect<boolean>;
-    readonly verify: (repo: string, presented: string) => Effect.Effect<"read" | "write" | null>;
+    readonly list: (repo: string) => Effect.Effect<ArtifactsTokenListResult, ArtifactsError>;
+    readonly revoke: (repo: string, tokenOrId: string) => Effect.Effect<boolean, ArtifactsError>;
+    readonly verify: (
+      repo: string,
+      presented: string,
+    ) => Effect.Effect<"read" | "write" | null, ArtifactsError>;
   }
 >()("artifacts/Tokens") {}
 
@@ -287,10 +275,23 @@ export interface TokenRow {
   readonly digest: string;
   readonly createdAt: string;
   readonly expiresAt: string;
-  revoked: boolean;
+  readonly revoked: boolean;
 }
 
-const makeTokens = (rows: TokenRow[], persist: () => Promise<void>) => {
+const makeTokens = (
+  initial: ReadonlyArray<TokenRow>,
+  persist: (rows: ReadonlyArray<TokenRow>) => Effect.Effect<void, ArtifactsError>,
+) => {
+  let rows = initial;
+  const writers = Semaphore.makeUnsafe(1);
+  const commit = (next: ReadonlyArray<TokenRow>) =>
+    persist(next).pipe(
+      Effect.tap(() =>
+        Effect.sync(() => {
+          rows = next;
+        }),
+      ),
+    );
   const digestOf = (plaintext: string) =>
     Effect.promise(async () => {
       const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(plaintext));
@@ -304,9 +305,12 @@ const makeTokens = (rows: TokenRow[], persist: () => Promise<void>) => {
         : "active";
 
   return Tokens.of({
-    issue: (repo, scope, ttlSeconds) =>
-      Effect.gen(function* () {
-        if (!(ttlSeconds > 0)) return yield* failure("INVALID_TTL", `ttl ${ttlSeconds}`);
+    issue: Effect.fn("Artifacts.Tokens.issue")(
+      function* (repo, scope, ttlSeconds) {
+        const expires = Date.now() + ttlSeconds * 1000;
+        if (!(ttlSeconds > 0) || !Number.isFinite(expires) || expires > 8.64e15) {
+          return yield* failure("INVALID_TTL", `ttl ${ttlSeconds}`);
+        }
         const plaintext = `art_${crypto.randomUUID().replaceAll("-", "")}`;
         const row: TokenRow = {
           id: crypto.randomUUID(),
@@ -314,14 +318,16 @@ const makeTokens = (rows: TokenRow[], persist: () => Promise<void>) => {
           scope,
           digest: yield* digestOf(plaintext),
           createdAt: new Date().toISOString(),
-          expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString(),
+          expiresAt: new Date(expires).toISOString(),
           revoked: false,
         };
-        rows.push(row);
-        yield* Effect.promise(persist);
+        yield* commit([...rows, row]);
         return { id: row.id, plaintext, scope, expiresAt: row.expiresAt };
-      }),
-    list: (repo) =>
+      },
+      Effect.uninterruptible,
+      Semaphore.withPermit(writers),
+    ),
+    list: Effect.fn("Artifacts.Tokens.list")((repo) =>
       Effect.sync(() => {
         const mine = rows.filter((row) => row.repo === repo);
         return {
@@ -335,39 +341,32 @@ const makeTokens = (rows: TokenRow[], persist: () => Promise<void>) => {
           total: mine.length,
         };
       }),
-    revoke: (repo, tokenOrId) =>
-      Effect.gen(function* () {
+    ),
+    revoke: Effect.fn("Artifacts.Tokens.revoke")(
+      function* (repo, tokenOrId) {
         const digest = yield* digestOf(tokenOrId);
         const row = rows.find(
           (row) => row.repo === repo && (row.id === tokenOrId || row.digest === digest),
         );
         if (row === undefined || row.revoked) return false;
-        row.revoked = true;
-        yield* Effect.promise(persist);
+        yield* commit(rows.map((held) => (held.id === row.id ? { ...held, revoked: true } : held)));
         return true;
-      }),
-    verify: (repo, presented) =>
-      Effect.gen(function* () {
-        const digest = yield* digestOf(presented);
-        const row = rows.find((row) => row.repo === repo && row.digest === digest);
-        return row !== undefined && stateOf(row) === "active" ? row.scope : null;
-      }),
+      },
+      Effect.uninterruptible,
+      Semaphore.withPermit(writers),
+    ),
+    verify: Effect.fn("Artifacts.Tokens.verify")(function* (repo, presented) {
+      const digest = yield* digestOf(presented);
+      const row = rows.find((row) => row.repo === repo && row.digest === digest);
+      return row !== undefined && stateOf(row) === "active" ? row.scope : null;
+    }),
   });
 };
 
-export const tokensMemory = Layer.sync(Tokens)(() => makeTokens([], () => Promise.resolve()));
+export const tokensMemory = Layer.sync(Tokens)(() => makeTokens([], () => Effect.void));
 
 /** Digests only at rest, in the durable form too. */
-export const tokensNode = (root: string) =>
-  Layer.effect(
-    Tokens,
-    Effect.promise(async () => {
-      const file = path.join(root, ".tokens.json");
-      const rows = (await loadJson<TokenRow[]>(file)) ?? [];
-      const persist = jsonWriter(file);
-      return makeTokens(rows, () => persist(rows));
-    }),
-  );
+export const tokensNode = (root: string) => Layer.effect(Tokens, tokenFile(root, makeTokens));
 
 export interface StoreInstances {
   readonly objects: ObjectStore["Service"];
@@ -619,7 +618,8 @@ const ForkLinks = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Stri
 export const repoStoresNode = (root: string) =>
   Layer.effect(
     RepoStores,
-    Effect.sync(() => {
+    Effect.gen(function* () {
+      const forkLimits = yield* MetadataCapacity.configuration("forks").pipe(Effect.orDie);
       const forksFile = path.join(root, ".forks.json");
       const persistForks = jsonWriter(forksFile);
       const forks = new Map<string, string>();
@@ -701,11 +701,11 @@ export const repoStoresNode = (root: string) =>
           if (from === parent && !remaining.includes(child)) remaining.push(child);
         }
         if (remaining.length === 0) {
-          await fs.rm(borrowers, { force: true });
+          await removeMetadata(borrowers);
           return;
         }
         try {
-          await fs.writeFile(borrowers, `${remaining.join("\n")}\n`);
+          await replaceMetadata(borrowers, `${remaining.join("\n")}\n`);
         } catch (error) {
           // No directory to write into means no parent to tell — it was
           // deleted while this ran. Creating one would put a deleted
@@ -829,7 +829,9 @@ export const repoStoresNode = (root: string) =>
         Effect.tryPromise({
           try: write,
           catch: (error) =>
-            failure("INTERNAL_ERROR", `could not write '${name}': ${String(error)}`),
+            error instanceof ArtifactsError
+              ? error
+              : failure("INTERNAL_ERROR", `could not write '${name}': ${String(error)}`),
         });
 
       /**
@@ -859,12 +861,13 @@ export const repoStoresNode = (root: string) =>
        * out from under it. The lock is the file's; the work under it is two
        * small writes.
        */
-      const alone = async <A>(work: () => Promise<A>): Promise<A> => {
+      const alone = async <A>(work: () => Promise<A>, bounded = false): Promise<A> => {
         await fs.mkdir(root, { recursive: true });
         const lock = `${forksFile}.lock`;
         const handle = await fs.open(lock, "wx", 0o600);
         try {
           await handle.close();
+          if (bounded) await MetadataCapacity.inspect(forksFile, forkLimits);
           await refreshForks();
           return await work();
         } finally {
@@ -945,7 +948,10 @@ export const repoStoresNode = (root: string) =>
         if (ours && removing.lenders === undefined) {
           await unlendAll(name, next);
         }
-        if (previous === parent) return;
+        if (previous === parent) {
+          await syncRegistry(forksFile);
+          return;
+        }
         await persistForks(Object.fromEntries(next));
         if (parent === undefined) forks.delete(name);
         else forks.set(name, parent);
@@ -1108,6 +1114,7 @@ export const repoStoresNode = (root: string) =>
               const forkable = yield* onDisk(child, () =>
                 alone(async () => {
                   if (missing(path.join(root, parent))) return false;
+                  const borrowers = await prepareFork(root, forks, child, parent, forkLimits);
 
                   // git's own way of saying "my objects are over there too". The
                   // in-memory fall-through only exists inside this process, and
@@ -1116,7 +1123,7 @@ export const repoStoresNode = (root: string) =>
                   // read this file since 2005.
                   const info = path.join(root, child, "objects", "info");
                   await fs.mkdir(info, { recursive: true });
-                  await fs.writeFile(
+                  await replaceMetadata(
                     path.join(info, "alternates"),
                     `${path.resolve(root, parent, "objects")}\n`,
                   );
@@ -1125,7 +1132,7 @@ export const repoStoresNode = (root: string) =>
                   // parent needs to know it is lent out, because its own `gc`
                   // cannot see the refs that keep these objects alive.
                   //
-                  // Appended where the parent's own directory already is, never
+                  // Replaced where the parent's own directory already is, never
                   // created. A `delete(parent)` that got in first would
                   // otherwise be undone by this — the parent's directory back
                   // on disk, holding one file, which is enough to block the
@@ -1140,7 +1147,7 @@ export const repoStoresNode = (root: string) =>
                     // fails and nothing is written.
                     await beside(path.join(root, parent, "objects"));
                     await beside(lent);
-                    await fs.appendFile(path.join(lent, "borrowers"), `${child}\n`);
+                    await replaceMetadata(path.join(lent, "borrowers"), borrowers);
                   } catch (error) {
                     if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
                       throw error;
@@ -1149,7 +1156,7 @@ export const repoStoresNode = (root: string) =>
 
                   await relinkHeld(child, parent);
                   return true;
-                }),
+                }, true),
               );
               if (!forkable) {
                 return yield* failure("NOT_FOUND", `repo '${parent}' has no storage to fork from`);
@@ -1164,6 +1171,7 @@ export const repoStoresNode = (root: string) =>
               rebuilt(child);
               return yield* openHeld(child);
             }),
+          Effect.tapError(MetadataCapacity.report("forks")),
           Effect.uninterruptible,
           Semaphore.withPermit(metadata),
         ),
@@ -1183,9 +1191,7 @@ export const repoStoresNode = (root: string) =>
                 // included, so a directory that outlived its registry row would
                 // hand the repository created here next the old parent's objects
                 // — the one thing this call exists to prevent.
-                await fs.rm(path.join(root, name, "objects", "info", "alternates"), {
-                  force: true,
-                });
+                await removeMetadata(path.join(root, name, "objects", "info", "alternates"));
               }),
             ),
           Effect.uninterruptible,
@@ -1486,6 +1492,19 @@ export const localNamespace = (
             );
           });
 
+        const withCurrent = <A>(record: RepoRecord, effect: Effect.Effect<A, ArtifactsError>) =>
+          reserve(
+            [record.name],
+            "PRECONDITION_FAILED",
+            Effect.gen(function* () {
+              const current = yield* ready(record.name);
+              if (current.id !== record.id) {
+                return yield* failure("NOT_FOUND", `repo '${record.name}' was replaced`);
+              }
+              return yield* effect;
+            }),
+          );
+
         const repoClient = (record: RepoRecord): RepoClient => ({
           raw: Effect.fail(
             failure(
@@ -1493,9 +1512,10 @@ export const localNamespace = (
               "ArtifactsRepo cannot be produced off-platform; use the client methods",
             ),
           ),
-          createToken: (scope, ttl) => tokens.issue(record.name, scope ?? "read", ttl ?? 3600),
-          listTokens: () => tokens.list(record.name),
-          revokeToken: (tokenOrId) => tokens.revoke(record.name, tokenOrId),
+          createToken: (scope, ttl) =>
+            withCurrent(record, tokens.issue(record.name, scope ?? "read", ttl ?? 3600)),
+          listTokens: () => withCurrent(record, tokens.list(record.name)),
+          revokeToken: (tokenOrId) => withCurrent(record, tokens.revoke(record.name, tokenOrId)),
           fork: Effect.fn("Artifacts.Namespace.fork")((name, opts) =>
             reserve(
               [record.name, name],

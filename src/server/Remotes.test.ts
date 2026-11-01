@@ -73,8 +73,16 @@ let guarded: Server;
 
 beforeAll(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), "server-remotes-"));
-  server = await serve({ root: path.join(root, "open"), allowAnonymousWrites: true });
-  guarded = await serve({ root: path.join(root, "guarded"), allowAnonymousWrites: true });
+  server = await serve({
+    root: path.join(root, "open"),
+    allowAnonymousWrites: true,
+    allowLoopbackEgress: true,
+  });
+  guarded = await serve({
+    root: path.join(root, "guarded"),
+    allowAnonymousWrites: true,
+    allowLoopbackEgress: true,
+  });
   const member = await enableHubUnder(path.join(root, "guarded"), "received", [
     "repo.read",
     "source.push",
@@ -190,7 +198,7 @@ describe("Remotes", () => {
     }).pipe(Effect.provide(Remotes.memory)),
   );
 
-  it.effect("reads a hand-edited standing instruction it cannot make sense of as none", () =>
+  it.effect("refuses a malformed standing instruction without discarding the registry", () =>
     Effect.promise(async () => {
       // The file is a repository's, and repositories get edited and get carried
       // between versions. Trusted as written, a `refs` that is not a list is a
@@ -213,18 +221,14 @@ describe("Remotes", () => {
           ]),
         );
 
-        const held = await Effect.runPromise(
+        const error = await Effect.runPromise(
           Effect.flatMap(Remotes.Remotes, (registry) => registry.list).pipe(
             Effect.provide(remotesFile(location)),
+            Effect.flip,
           ),
         );
 
-        assert.equal(
-          held[0]?.sync,
-          null,
-          "unreadable reads as manual, not as a shape nothing checked",
-        );
-        assert.equal(Remotes.sends(held[0]!), false);
+        assert.equal(error._tag, "StorageFailure");
       } finally {
         await fs.rm(directory, { recursive: true, force: true });
       }

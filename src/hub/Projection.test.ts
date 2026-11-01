@@ -478,8 +478,9 @@ describe("hub projection", () => {
             const repository = yield* Repository;
             const where = yield* world();
 
-            // Opened until the approval's oid sorts *above* the opening's, so
-            // that there is a window between them for the sibling to land in.
+            // Require a window of at least 1/16 of the hash space. Merely
+            // sorting above can leave an arbitrarily narrow window that the
+            // bounded sibling search misses even when projection is correct.
             // Both oids are the repository's to choose and neither is grindable
             // from here, so the fixture retries rather than steering them.
             let pr = "";
@@ -487,7 +488,12 @@ describe("hub projection", () => {
             // SAFETY: replaced on the first pass of the loop below, before it is
             // compared against anything; the empty string is only its shape.
             let approval = "" as Oid;
-            for (let round = 0; round < 32; round++) {
+            const wideWindow = () =>
+              first !== undefined &&
+              Number.parseInt(approval.slice(0, 8), 16) -
+                Number.parseInt(first.commit.slice(0, 8), 16) >=
+                0x10000000;
+            for (let round = 0; round < 64; round++) {
               ({ pr } = yield* PullRequest.open({
                 repo: where.genesis.repoId,
                 title: "Add a thing",
@@ -506,8 +512,9 @@ describe("hub projection", () => {
               first = (yield* Event.entries(pr)).events.find(
                 (entry) => entry.payload?.type === "pr.opened",
               );
-              if (first !== undefined && first.commit < approval) break;
+              if (wideWindow()) break;
             }
+            assert.ok(wideWindow(), "the fixture must establish a sufficiently wide hash window");
 
             // The author's own retarget: written the ordinary way, then moved
             // to sit *beside* the approval rather than on top of it, and ground

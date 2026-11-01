@@ -10,7 +10,7 @@
  * a reload.
  */
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "@effect/vitest";
@@ -18,8 +18,32 @@ import { afterEach, beforeEach, describe, it } from "@effect/vitest";
 import { Effect } from "effect";
 
 import { assetResponse, built, fileAt, mimeOf } from "./Static.node.ts";
+import { headers as securityHeaders } from "./UiSecurity.ts";
 
 describe("Static", () => {
+  it.effect(
+    "keeps Node and Cloudflare asset policies identical, including deep links and HEAD",
+    () =>
+      Effect.promise(async () => {
+        const rules = (
+          await readFile(new URL("../ui/public/_headers", import.meta.url), "utf8")
+        ).toLowerCase();
+        for (const pathname of ["/hub/", "/hub/code/nested/file.ts", "/hub/main.js"]) {
+          for (const method of ["GET", "HEAD"]) {
+            const response = await assetResponse(
+              root,
+              new Request(`http://host${pathname}`, { method }),
+            );
+            assert.ok(response);
+            for (const [name, value] of Object.entries(securityHeaders)) {
+              assert.equal(response.headers.get(name), value);
+              assert.ok(rules.includes(`  ${name}: ${value.toLowerCase()}\n`));
+            }
+          }
+        }
+      }),
+  );
+
   let root = "";
   let outside = "";
 

@@ -13,10 +13,14 @@
  */
 import * as Alchemy from "@alchemy.run/cloudflare";
 import type * as Http from "alchemy/Http";
-import { Config, Context, Effect, Layer } from "effect";
+import { Config, Context, Effect, Layer, Stream } from "effect";
 import { FetchHttpClient, HttpClient, HttpServerRequest, HttpServerResponse } from "effect/http";
 
 import { stores } from "../git/Cloudflare.ts";
+import * as GitCapacity from "../git/Capacity.cloudflare.ts";
+import * as HeadCapacity from "../git/HeadCapacity.cloudflare.ts";
+import * as GitMetadataCapacity from "../git/MetadataCapacity.cloudflare.ts";
+import * as RegistryCapacity from "../server/RegistryCapacity.ts";
 import type { Sql } from "../git/Sql.ts";
 import * as GitRepository from "../git/Repository.ts";
 import type { Repository } from "../git/Repository.ts";
@@ -24,8 +28,10 @@ import * as Api from "../server/Api.ts";
 import { syntax as anchorSyntax } from "../hub/Anchor.syntax.ts";
 import * as Auth from "../server/Auth.ts";
 import { r2 as lfsR2 } from "../server/Lfs.cloudflare.ts";
+import * as LfsCapacity from "../server/LfsCapacity.ts";
 import * as Policy from "../server/Policy.ts";
 import * as Snapshot from "../server/Snapshot.ts";
+import * as SnapshotCapacity from "../server/SnapshotCapacity.ts";
 import * as SnapshotPublisher from "../server/SnapshotPublisher.ts";
 import { collects, normalize, readsStore, routeOf, settledWithin } from "../server/Route.ts";
 import * as Remotes from "../server/Remotes.ts";
@@ -33,7 +39,21 @@ import * as Router from "../server/Router.ts";
 import * as Sending from "../server/Sending.ts";
 import * as Subscribers from "../server/Subscribers.ts";
 import * as Webhooks from "../server/Webhooks.ts";
+import * as RequestLimits from "../server/RequestLimits.ts";
 import { Objects } from "../objects.ts";
+import { Transport } from "../client/Transport.ts";
+import * as Egress from "./Egress.cloudflare.ts";
+import * as CloudflareRequest from "./CloudflareRequest.ts";
+import * as CloudflareAdmission from "./CloudflareAdmission.ts";
+import * as BackupAdmin from "./CloudflareBackupAdmin.ts";
+import * as BackupFence from "./CloudflareBackupFence.ts";
+import * as RequestUpload from "./RequestUpload.ts";
+import * as ResponseDelivery from "./ResponseDelivery.ts";
+import * as Provisioning from "../server/Provisioning.ts";
+import * as ProvisioningState from "../server/ProvisioningState.ts";
+import { Invalid, StorageFailure } from "../git/Error.ts";
+import { ImportBudget } from "../git/Pack.ts";
+import { bytesToHex } from "../git/Format.ts";
 
 /**
  * What other scripts may call on a repository: it is an HTTP surface.
@@ -44,7 +64,7 @@ import { Objects } from "../objects.ts";
  * calling it. A function here type-checks and then fails every request at the
  * edge, on the one path no test covers.
  */
-export interface RepoBindings {
+export interface RepoBindings extends BackupAdmin.Interface {
   readonly fetch: Http.HttpEffect;
 }
 
@@ -55,10 +75,26 @@ export default Repo.make(
     // init: bind the bucket and resolve this instance's storage, once.
     const bucket = yield* Alchemy.R2.ReadWriteBucket(Objects);
     const state = yield* Alchemy.DurableObjectState;
+    // Config reads must execute in the deploy-time initializer so Alchemy binds
+    // them into the Worker environment; the nested runtime effect is too late.
+    const lfsCapacity = yield* LfsCapacity.configuration().pipe(Effect.orDie);
+    const gitCapacity = yield* GitCapacity.configuration().pipe(Effect.orDie);
+    const headBytes = yield* HeadCapacity.configuration.pipe(Effect.orDie);
+    const gitMetadataCapacity = yield* GitMetadataCapacity.configuration().pipe(Effect.orDie);
+    const registryCapacity = yield* RegistryCapacity.configuration().pipe(Effect.orDie);
+    const snapshotBytes = yield* SnapshotCapacity.configuration.pipe(Effect.orDie);
+    const budgets = yield* RequestLimits.configuration().pipe(Effect.orDie);
+    const admit = yield* CloudflareAdmission.make().pipe(Effect.orDie);
+    const uploadIdleMs = yield* RequestUpload.configuration().pipe(Effect.orDie);
+    const transport = Egress.make(yield* Egress.configuration().pipe(Effect.orDie));
+    const allowAnonymousWrites = yield* Config.Boolean("ALLOW_ANONYMOUS_WRITES").pipe(
+      Config.withDefault(false),
+      Effect.orElseSucceed(() => false),
+    );
 
     // The nested `Effect<Effect<…>>` is alchemy's DO contract, not a mistake:
-    // the outer generator binds resources once per instance, the inner runs
-    // per request with `RuntimeContext` available.
+    // the outer initializer discovers bindings and runs per activation; the
+    // inner builds the instance's handlers with `RuntimeContext` available.
     // @effect-diagnostics-next-line returnEffectInGen:off
     return Effect.gen(function* () {
       // `raw` is RuntimeContext-coloured: available here, not at init.
@@ -66,6 +102,7 @@ export default Repo.make(
       // disagree (their `Headers` differ) but describe the same runtime
       // object, so one conversion crosses that seam here and nowhere else.
       const r2: R2Bucket = (yield* bucket.raw) as never;
+      const backup = BackupFence.make(state.raw.storage);
 
       /**
        * Built per instance, not per request: `Repository` is constructed
@@ -82,10 +119,16 @@ export default Repo.make(
       // — same value domain, cursor with `toArray` — the declarations differ
       // only in Alchemy's wider `any[]` bindings parameter.
       const sql = state.raw.storage.sql as Sql;
-      const subscribers = (repo: string) => Subscribers.sql(sql, repo);
+      const subscribers = (repo: string) => Subscribers.sql(sql, repo, registryCapacity);
 
       /** The remotes this repository fetches from, on that same SQLite. */
-      const remotes = (repo: string) => Remotes.sql(sql, repo);
+      const remotes = (repo: string) => Remotes.sql(sql, repo, registryCapacity);
+      const requestLimits = Layer.succeed(RequestLimits.RequestLimits)(budgets);
+      const provisionState = yield* Effect.cached(
+        ProvisioningState.make(sql, (work) => state.raw.storage.transactionSync(work)).pipe(
+          Effect.orDie,
+        ),
+      );
 
       const live = (repo: string): Layer.Layer<Repository> => {
         const existing = layers.get(repo);
@@ -100,7 +143,10 @@ export default Repo.make(
           // drop the ones it was handed.
           Effect.context<never>().pipe(
             Effect.map((context) => {
-              state.raw.waitUntil(Effect.runPromiseWith(context)(Effect.ignore(effect)));
+              const release = backup.followup();
+              state.raw.waitUntil(
+                Effect.runPromiseWith(context)(Effect.ignore(effect)).finally(release),
+              );
             }),
           );
 
@@ -113,7 +159,11 @@ export default Repo.make(
             return GitRepository.hooksAll([
               Webhooks.service({
                 subscribers: subscribed,
-                client,
+                client: client.pipe(
+                  HttpClient.transformResponse(
+                    Effect.provideService(FetchHttpClient.Fetch, transport),
+                  ),
+                ),
                 options: { background: detached },
               }),
               // The repository a forward pushes from is built when the push
@@ -123,11 +173,19 @@ export default Repo.make(
                 remotes: registry,
                 using: (effect) =>
                   effect.pipe(
+                    Effect.provideService(Transport, { fetch: transport }),
                     Effect.provide(
                       GitRepository.layer.pipe(
                         Layer.provide(GitRepository.hooksNoop),
                         Layer.provideMerge(
-                          stores({ bucket: r2, repo, storage: state.raw.storage }),
+                          stores({
+                            bucket: r2,
+                            repo,
+                            storage: state.raw.storage,
+                            capacity: gitCapacity,
+                            metadata: gitMetadataCapacity,
+                            headBytes,
+                          }),
                         ),
                       ),
                     ),
@@ -145,7 +203,16 @@ export default Repo.make(
           // `provideMerge`: `provide` would swallow the `Storage` identity the
           // cross-request memos key on, and two repositories in one namespace
           // would share every entry.
-          Layer.provideMerge(stores({ bucket: r2, repo, storage: state.raw.storage })),
+          Layer.provideMerge(
+            stores({
+              bucket: r2,
+              repo,
+              storage: state.raw.storage,
+              capacity: gitCapacity,
+              metadata: gitMetadataCapacity,
+              headBytes,
+            }),
+          ),
         );
         layers.set(repo, built);
         return built;
@@ -172,19 +239,12 @@ export default Repo.make(
         const pending = delivering.get(repo) ?? new Set();
         pending.add(done);
         delivering.set(repo, pending);
-        void done.then(() => pending.delete(done));
+        void done.then(() => {
+          pending.delete(done);
+          if (pending.size === 0) delivering.delete(repo);
+        });
 
-        return new Response(
-          response.body.pipeThrough(
-            new TransformStream({
-              flush: () => finished(),
-              // A client that goes away cancels the stream; without this the
-              // promise would never settle and only the timeout would clear it.
-              cancel: () => finished(),
-            }),
-          ),
-          response,
-        );
+        return ResponseDelivery.track(response, finished);
       };
 
       const awaitDelivery = (repo: string) => settledWithin(delivering.get(repo) ?? nothing);
@@ -207,9 +267,12 @@ export default Repo.make(
         const existing = routers.get(repo);
         if (existing !== undefined) return existing;
         const built = Router.handler({
+          transport,
+          jsonBodyBytes: budgets.jsonBodyBytes,
+          protocol: requestLimits,
           api: Api.layer(remotes(repo), anchorSyntax),
           services: live(repo).pipe(
-            Layer.provideMerge(lfsR2({ bucket: r2, repo })),
+            Layer.provideMerge(lfsR2({ bucket: r2, repo, capacity: lfsCapacity })),
             Layer.provideMerge(subscribers(repo)),
             Layer.provideMerge(openWrites),
           ),
@@ -233,13 +296,74 @@ export default Repo.make(
        * Republished synchronously after every request that can move refs and
        * *before* its response is acknowledged, so the front Worker's
        * stateless read path — which serves anonymous clones from R2 alone —
-       * is never behind an acknowledged write. When the snapshot cannot be
-       * written, it is removed instead: readers then fall back to this
-       * Durable Object, which is always right. Degraded, but never wrong.
+       * is never behind an acknowledged write. Invalidate before changing
+       * refs; refuse the mutation when invalidation fails. Publication failure
+       * then leaves reads with this authoritative Durable Object.
        */
-      const republish = yield* SnapshotPublisher.make((repo, previous) =>
-        Snapshot.capture(previous).pipe(Effect.provide(live(repo))),
-      ).pipe(Effect.provide(SnapshotPublisher.cloudflare(r2, state.raw.storage)));
+      const mutate = yield* SnapshotPublisher.make((repo, previous) =>
+        Effect.gen(function* () {
+          const provisioning = yield* provisionState;
+          if ((yield* provisioning.read(repo))?.status === "pending")
+            return yield* new Invalid({
+              field: "provisioning",
+              reason: "authority installation is pending",
+            });
+          return yield* Snapshot.capture(previous);
+        }).pipe(Effect.provide(live(repo))),
+      ).pipe(Effect.provide(SnapshotPublisher.cloudflare(r2, state.raw.storage, snapshotBytes)));
+
+      const provision = Effect.fn("CloudflareHost.provision")(function* (repo: string) {
+        const provisioning = yield* provisionState;
+        const saved = yield* provisioning.read(repo);
+        if (saved?.status === "installed") return;
+        const held = yield* Effect.tryPromise({
+          try: () => r2.get(Provisioning.keyOf(repo)),
+          catch: (cause) =>
+            new StorageFailure({ operation: "provisioning.read", path: "provisioning", cause }),
+        });
+        if (held === null) {
+          if (saved !== null)
+            return yield* new Invalid({
+              field: "provisioning",
+              reason: "reserved artifact is unavailable",
+            });
+          return;
+        }
+        if (held.size > Provisioning.MAX_BYTES) {
+          yield* Effect.promise(() => held.body.cancel());
+          return yield* new Invalid({ field: "provisioning", reason: "artifact is too large" });
+        }
+        const bytes = yield* Effect.tryPromise({
+          try: async () => new Uint8Array(await held.arrayBuffer()),
+          catch: (cause) =>
+            new StorageFailure({ operation: "provisioning.read", path: "provisioning", cause }),
+        });
+        const artifact = yield* Provisioning.decode(bytes, repo);
+        const digest = yield* Effect.promise(async () =>
+          bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))),
+        );
+        const reservation = {
+          digest,
+          repoId: artifact.repoId,
+          genesis: artifact.genesis,
+          trust: artifact.trust,
+        };
+        yield* mutate(
+          repo,
+          Effect.gen(function* () {
+            if ((yield* provisioning.reserve(repo, reservation)) === "installed") return;
+            const repository = yield* GitRepository.Repository;
+            yield* repository
+              .unpack(Stream.make(artifact.pack))
+              .pipe(Effect.provideService(ImportBudget, Provisioning.importLimits));
+            yield* provisioning.publish(repo, reservation);
+            yield* Effect.logInfo("repository authority provisioned", {
+              component: "CloudflareHost",
+              event: "provisioning_installed",
+            });
+          }).pipe(Effect.provide(live(repo))),
+        );
+      });
 
       /**
        * Whether writes to repositories with no genesis are served.
@@ -247,12 +371,7 @@ export default Repo.make(
        * Off unless the binding says so, like `serve --open`: such a repository
        * has no membership to authorize anybody with.
        */
-      const openWrites = Policy.anonymousWrites(
-        yield* Config.Boolean("ALLOW_ANONYMOUS_WRITES").pipe(
-          Config.withDefault(false),
-          Effect.orElseSucceed(() => false),
-        ),
-      );
+      const openWrites = Policy.anonymousWrites(allowAnonymousWrites);
 
       /** The routing, over the platform request the bridge was handed. */
       const serve = (request: Request): Effect.Effect<Response> =>
@@ -264,52 +383,100 @@ export default Repo.make(
           const { repo } = matched;
           request = normalize(request, matched);
 
-          // Auth runs here because this is where the trust state is: the
-          // guard reads the repository's own genesis and membership log. The
-          // Worker in front of this is a router and holds no secret — there is
-          // nothing for it to authenticate with.
-          const guarded = yield* Auth.guard(request).pipe(
-            Effect.provide(
-              Layer.mergeAll(
-                live(repo),
-                nonces,
-                openWrites,
-                // The edge routed this request here under the host configured
-                // for this Worker, so the URL's host is the destination and
-                // not the client's to choose. See `Auth.arrivedAtRequestUrl`.
-                Auth.arrivedAtRequestUrl(request),
-              ),
+          const prepared = yield* provision(repo).pipe(
+            Effect.tapError(() =>
+              Effect.logError("repository provisioning unavailable; request refused", {
+                component: "CloudflareHost",
+                event: "provisioning_unavailable",
+              }),
             ),
-            Effect.orElseSucceed(() => ({
-              denied: new Response("authentication unavailable", { status: 503 }),
-              authenticated: Auth.anonymous,
-            })),
+            Effect.result,
           );
-          if (guarded.denied !== null) return guarded.denied;
-          const response = yield* Effect.promise(async () => {
-            if (collects(request)) await awaitDelivery(repo);
-            const response = await handlerOf(repo)(
-              request,
-              Auth.requesterContext(guarded.authenticated),
+          if (prepared._tag === "Failure")
+            return new Response("repository provisioning unavailable", {
+              status: 503,
+              headers: { "cache-control": "no-store" },
+            });
+
+          const perform = Effect.gen(function* () {
+            // Auth runs here because this is where the trust state is: the
+            // guard reads the repository's own genesis and membership log. The
+            // Worker in front of this is a router and holds no secret — there is
+            // nothing for it to authenticate with.
+            const guarded = yield* Auth.guard(request).pipe(
+              Effect.provide(
+                Layer.mergeAll(
+                  live(repo),
+                  nonces,
+                  openWrites,
+                  // The edge routed this request here under the host configured
+                  // for this Worker, so the URL's host is the destination and
+                  // not the client's to choose. See `Auth.arrivedAtRequestUrl`.
+                  Auth.arrivedAtRequestUrl(request),
+                ),
+              ),
+              Effect.tapError(() =>
+                Effect.logError("authorization storage unavailable; request refused", {
+                  component: "CloudflareHost",
+                  operation: "authenticate",
+                  event: "authorization_unavailable",
+                }),
+              ),
+              Effect.orElseSucceed(() => ({
+                denied: new Response("authentication unavailable", {
+                  status: 503,
+                  headers: { "cache-control": "no-store" },
+                }),
+                authenticated: Auth.anonymous,
+              })),
             );
-            return readsStore(request) ? track(repo, response) : response;
+            if (guarded.denied !== null) return guarded.denied;
+            return yield* Effect.promise(async () => {
+              if (collects(request)) await awaitDelivery(repo);
+              const response = await handlerOf(repo)(
+                request,
+                Auth.requesterContext(guarded.authenticated),
+              );
+              return readsStore(request) ? track(repo, response) : response;
+            }).pipe(
+              // The router owns a separate runtime. Its Request signal still
+              // cancels a disconnected upload, but abandoning its Promise here
+              // would publish a snapshot while that runtime could still write.
+              Effect.uninterruptible,
+            );
           });
-          // Reads never move refs; anything else may have, and the snapshot
-          // the stateless read path serves from must be current before this
-          // response acknowledges the change.
-          if (request.method !== "GET" && request.method !== "HEAD") {
-            yield* republish(repo);
-          }
-          return response;
+          if (request.method === "GET" || request.method === "HEAD") return yield* perform;
+          return yield* mutate(repo, perform).pipe(
+            Effect.catchTag("StorageFailure", () =>
+              Effect.succeed(new Response("snapshot invalidation unavailable", { status: 503 })),
+            ),
+          );
         });
 
       return {
+        ...BackupAdmin.make(state.raw.storage, state.raw.id.toString(), backup),
         fetch: Effect.gen(function* () {
           const incoming = yield* HttpServerRequest.HttpServerRequest;
           // SAFETY: the platform request, headers and body intact — the effect
           // wrapper was built from it, so `source` is that very object rather
           // than a rebuild of it.
-          return HttpServerResponse.raw(yield* serve(incoming.source as Request));
+          const original = incoming.source as Request;
+          const cancellation = new AbortController();
+          const upload = RequestUpload.open(
+            original,
+            AbortSignal.any([original.signal, cancellation.signal]),
+            uploadIdleMs,
+          );
+          const request = upload.request;
+          return yield* CloudflareRequest.respond(
+            admit(
+              backup.respond(serve(request)),
+              () => cancellation.abort(),
+              Effect.promise(() => upload.idle),
+            ).pipe(Effect.ensuring(Effect.sync(upload.close)), Effect.map(HttpServerResponse.raw)),
+            request.signal,
+            "CloudflareHost",
+          );
         }),
       };
     });

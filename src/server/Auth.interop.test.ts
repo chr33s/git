@@ -9,6 +9,7 @@
  */
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -125,7 +126,7 @@ describe.skipIf(!hasGit)("Auth interop with git", () => {
     Effect.promise(async () => {
       const work = path.join(root, "work-read");
       const reader = gitAs(readToken);
-      await reader(root, "clone", "--quiet", remote("authed"), work);
+      await reader(root, "-c", "http.postBuffer=65536", "clone", "--quiet", remote("authed"), work);
       assert.equal(await fs.readFile(path.join(work, "g.txt"), "utf8"), "guarded\n");
 
       await fs.writeFile(path.join(work, "nope.txt"), "denied\n");
@@ -163,6 +164,31 @@ describe.skipIf(!hasGit)("Auth interop with git", () => {
         ),
       );
       assert.equal(serverMain, pushed);
+    }),
+  );
+
+  it.effect("accepts a chunked authenticated push larger than Git's HTTP buffer", () =>
+    Effect.promise(async () => {
+      const work = path.join(root, "work-streamed");
+      const writer = gitAs(writeToken);
+      await writer(root, "clone", "--quiet", remote("authed"), work);
+      await fs.writeFile(path.join(work, "streamed.bin"), randomBytes(256 * 1024));
+      await git(work, "add", ".");
+      await git(work, "commit", "--quiet", "-m", "streamed upload");
+      await writer(
+        work,
+        "-c",
+        "http.postBuffer=65536",
+        "push",
+        "--quiet",
+        "origin",
+        "HEAD:refs/heads/streamed",
+      );
+      assert.equal(
+        (await git(root, "--git-dir", path.join(root, "authed"), "rev-parse", "streamed")).trim(),
+        (await git(work, "rev-parse", "HEAD")).trim(),
+      );
+      await git(root, "--git-dir", path.join(root, "authed"), "fsck", "--strict");
     }),
   );
 

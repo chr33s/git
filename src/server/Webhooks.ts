@@ -16,7 +16,7 @@
  * verify with the library they already have.
  */
 import { bytesToHex } from "../git/Format.ts";
-import { Effect, Layer, Schedule, Schema } from "effect";
+import { Cause, Clock, Effect, Exit, Layer, Schedule, Schema } from "effect";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 
 import { Hooks, type ReceiveResult } from "../git/Repository.ts";
@@ -120,10 +120,13 @@ export const post = Effect.fn("Webhooks.post")(function* (
 export const deliver = Effect.fn("Webhooks.deliver")(function* (
   results: ReadonlyArray<ReceiveResult>,
   options?: DeliveryOptions,
+  /** Captured by the hook before handing work to the host scheduler. */
+  queuedAt?: number,
 ) {
   const events = eventOf(results);
   if (events.length === 0) return;
 
+  const queued = queuedAt ?? (yield* Clock.currentTimeMillis);
   const subscribers = yield* Subscribers;
   const targets = yield* subscribers.forEvent("push");
   if (targets.length === 0) return;
@@ -133,11 +136,27 @@ export const deliver = Effect.fn("Webhooks.deliver")(function* (
   yield* Effect.forEach(
     targets,
     (target) =>
-      post(target, body, options).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning(`webhook delivery to ${target.url} failed`, cause),
-        ),
-      ),
+      Effect.gen(function* () {
+        const started = yield* Clock.currentTimeMillis;
+        const result = yield* post(target, body, options).pipe(Effect.exit);
+        const failed = Exit.isFailure(result);
+        const cancelled = failed && Cause.hasInterruptsOnly(result.cause);
+        const fields = {
+          component: "Webhooks",
+          operation: "Webhooks.deliver",
+          event: "delivery_result",
+          outcome: cancelled ? "cancelled" : failed ? "failed" : "accepted",
+          subscriber: target.id,
+          refCount: events.length,
+          queueMs: Math.max(0, started - queued),
+          durationMs: Math.max(0, (yield* Clock.currentTimeMillis) - started),
+        };
+        // Transport failures include signed headers and private destination URLs.
+        // Keep their causes out of the fixed-field delivery result.
+        if (failed)
+          yield* Effect.logWarning("webhook delivery failed; reconciliation required", fields);
+        else yield* Effect.logInfo("webhook receiver accepted delivery", fields);
+      }),
     { concurrency: options?.concurrency ?? 8, discard: true },
   );
 });
@@ -159,13 +178,17 @@ export const service = (input: {
   return Hooks.of({
     preReceive: () => Effect.void,
     update: () => Effect.void,
-    postReceive: (results) =>
-      background(
-        deliver(results, options).pipe(
+    postReceive: Effect.fn("Webhooks.postReceive")(function* (
+      results: ReadonlyArray<ReceiveResult>,
+    ) {
+      const queuedAt = yield* Clock.currentTimeMillis;
+      yield* background(
+        deliver(results, options, queuedAt).pipe(
           Effect.provideService(Subscribers, subscribers),
           Effect.provideService(HttpClient.HttpClient, client),
         ),
-      ),
+      );
+    }),
   });
 };
 

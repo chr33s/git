@@ -27,6 +27,7 @@ import { isOid, type ObjectStore, type Oid, type RefStore, type RefUpdate } from
 import { ObjectStore as ObjectStoreTag, RefStore as RefStoreTag } from "../git/Store.ts";
 import { PktReader } from "../git/Pkt.ts";
 import { type Authorize, fetchAuthorized, operationOf } from "./Authorize.ts";
+import * as Transport from "./Transport.ts";
 
 export type { Authorize };
 
@@ -123,41 +124,43 @@ const symrefHead = (capabilities: ReadonlySet<string>): string | null => {
 const authorization = (token: string | undefined): Record<string, string> =>
   token === undefined ? {} : { authorization: `Bearer ${token}` };
 
-export const advertisement = Effect.fn("Fetch.advertisement")(
-  (
-    url: string,
-    options?: { readonly token?: string | undefined; readonly authorize?: Authorize | undefined },
-  ) =>
-    Effect.tryPromise({
-      try: async (signal) => {
-        const target = `${url}/info/refs?service=git-upload-pack`;
-        const response = await fetchAuthorized(
-          target,
-          { headers: authorization(options?.token), signal },
-          { operation: operationOf("GET", target), commands: [] },
-          options?.authorize,
-        );
-        if (!response.ok) throw new Error(`advertisement returned ${response.status}`);
-        const advertised = await advertisedRefs(response.body);
-        // Follow discovery's final repository URL for every later round, as
-        // Git does: an old repository location may redirect only discovery.
-        const resolved = new URL(response.url || target);
-        let base = url;
-        if (resolved.pathname.endsWith("/info/refs")) {
-          resolved.pathname = resolved.pathname.slice(0, -"/info/refs".length);
-          resolved.search = "";
-          resolved.hash = "";
-          base = resolved.href.replace(/\/$/, "");
-        }
-        return {
-          ...advertised,
-          url: base,
-          token: new URL(base).origin === new URL(url).origin ? options?.token : undefined,
-        };
-      },
-      catch: (cause) => unreachable(String(cause)),
-    }),
-);
+export const advertisement = Effect.fn("Fetch.advertisement")(function* (
+  url: string,
+  options?: { readonly token?: string | undefined; readonly authorize?: Authorize | undefined },
+) {
+  const transport = yield* Transport.current;
+  return yield* Effect.tryPromise({
+    try: async (signal) => {
+      const target = `${url}/info/refs?service=git-upload-pack`;
+      const response = await fetchAuthorized(
+        target,
+        { headers: authorization(options?.token), signal },
+        { operation: operationOf("GET", target), commands: [] },
+        options?.authorize,
+        undefined,
+        transport,
+      );
+      if (!response.ok) throw new Error(`advertisement returned ${response.status}`);
+      const advertised = await advertisedRefs(response.body);
+      // Follow discovery's final repository URL for every later round, as
+      // Git does: an old repository location may redirect only discovery.
+      const resolved = new URL(response.url || target);
+      let base = url;
+      if (resolved.pathname.endsWith("/info/refs")) {
+        resolved.pathname = resolved.pathname.slice(0, -"/info/refs".length);
+        resolved.search = "";
+        resolved.hash = "";
+        base = resolved.href.replace(/\/$/, "");
+      }
+      return {
+        ...advertised,
+        url: base,
+        token: new URL(base).origin === new URL(url).origin ? options?.token : undefined,
+      };
+    },
+    catch: (cause) => unreachable(String(cause)),
+  });
+});
 
 /**
  * Protocol v2's `ls-refs`, for the refs a v0 advertisement does not carry.
@@ -170,70 +173,72 @@ export const advertisement = Effect.fn("Fetch.advertisement")(
  * Only reached when a refspec names one of those namespaces, so an ordinary
  * clone still makes exactly the requests it always did.
  */
-const lsRefsV2 = Effect.fn("Fetch.lsRefsV2")(
-  (
-    url: string,
-    prefixes: ReadonlyArray<string>,
-    token: string | undefined,
-    authorize?: Authorize,
-  ) =>
-    Effect.tryPromise({
-      try: async (signal) => {
-        const lines = [
-          pktLine("command=ls-refs\n"),
-          "0001",
-          ...prefixes.map((prefix) => pktLine(`ref-prefix ${prefix}\n`)),
-          "0000",
-        ].join("");
+const lsRefsV2 = Effect.fn("Fetch.lsRefsV2")(function* (
+  url: string,
+  prefixes: ReadonlyArray<string>,
+  token: string | undefined,
+  authorize?: Authorize,
+) {
+  const transport = yield* Transport.current;
+  return yield* Effect.tryPromise({
+    try: async (signal) => {
+      const lines = [
+        pktLine("command=ls-refs\n"),
+        "0001",
+        ...prefixes.map((prefix) => pktLine(`ref-prefix ${prefix}\n`)),
+        "0000",
+      ].join("");
 
-        const response = await fetchAuthorized(
-          `${url}/git-upload-pack`,
-          {
-            method: "POST",
-            headers: {
-              "content-type": "application/x-git-upload-pack-request",
-              // The version travels in a header, not the body: the server has to
-              // know which conversation this is before it reads a pkt-line.
-              "git-protocol": "version=2",
-              ...authorization(token),
-            },
-            body: lines,
-            signal,
+      const response = await fetchAuthorized(
+        `${url}/git-upload-pack`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/x-git-upload-pack-request",
+            // The version travels in a header, not the body: the server has to
+            // know which conversation this is before it reads a pkt-line.
+            "git-protocol": "version=2",
+            ...authorization(token),
           },
-          { operation: "git-upload-pack", commands: [] },
-          authorize,
-        );
-        // A server with no v2 to offer answers 404 or 501, and has no hub state
-        // either. Anything else is a failure the caller has to see, or a
-        // replication run reports success having fetched nothing, revocations
-        // included — and this is only ever called when the caller *needs* the
-        // hidden namespaces, which no other request can reach.
-        //
-        // 400 is not on that list, deliberately. It is what this project's own
-        // upload-pack answers when the `Git-Protocol` header did not arrive —
-        // a proxy that strips unknown headers is the ordinary cause — so reading
-        // it as "no v2 here" turned the one misconfiguration that breaks hub
-        // replication into a silent success.
-        if (response.status === 404 || response.status === 501) return [];
-        if (!response.ok) throw new Error(`ls-refs returned ${response.status}`);
-        if (response.body === null) return [];
+          body: lines,
+          signal,
+        },
+        { operation: "git-upload-pack", commands: [] },
+        authorize,
+        undefined,
+        transport,
+      );
+      // A server with no v2 to offer answers 404 or 501, and has no hub state
+      // either. Anything else is a failure the caller has to see, or a
+      // replication run reports success having fetched nothing, revocations
+      // included — and this is only ever called when the caller *needs* the
+      // hidden namespaces, which no other request can reach.
+      //
+      // 400 is not on that list, deliberately. It is what this project's own
+      // upload-pack answers when the `Git-Protocol` header did not arrive —
+      // a proxy that strips unknown headers is the ordinary cause — so reading
+      // it as "no v2 here" turned the one misconfiguration that breaks hub
+      // replication into a silent success.
+      if (response.status === 404 || response.status === 501) return [];
+      if (!response.ok) throw new Error(`ls-refs returned ${response.status}`);
+      if (response.body === null) return [];
 
-        const refs: RemoteRef[] = [];
-        const reader = new PktReader(chunks(response.body));
-        for (;;) {
-          const item = await reader.next();
-          if (item === "eof" || item === "flush" || item === "end") break;
-          if (item === "delim") continue;
-          // `<oid> <name>` and, for HEAD, a trailing `symref-target:` this
-          // caller has no use for.
-          const [oid = "", name = ""] = decoder.decode(item).replace(/\n$/, "").split(" ");
-          if (isOid(oid) && name.length > 0) refs.push({ oid, name });
-        }
-        return refs;
-      },
-      catch: (cause) => unreachable(String(cause)),
-    }),
-);
+      const refs: RemoteRef[] = [];
+      const reader = new PktReader(chunks(response.body));
+      for (;;) {
+        const item = await reader.next();
+        if (item === "eof" || item === "flush" || item === "end") break;
+        if (item === "delim") continue;
+        // `<oid> <name>` and, for HEAD, a trailing `symref-target:` this
+        // caller has no use for.
+        const [oid = "", name = ""] = decoder.decode(item).replace(/\n$/, "").split(" ");
+        if (isOid(oid) && name.length > 0) refs.push({ oid, name });
+      }
+      return refs;
+    },
+    catch: (cause) => unreachable(String(cause)),
+  });
+});
 
 /** The refs a remote advertises for fetching, `HEAD` included. */
 export const lsRemote = Effect.fn("Fetch.lsRemote")(function* (
@@ -333,7 +338,8 @@ const uploadPack = async (
   token: string | undefined,
   body: Uint8Array<ArrayBuffer>,
   signal: AbortSignal,
-  authorize?: Authorize,
+  authorize: Authorize | undefined,
+  transport: typeof globalThis.fetch,
 ): Promise<AsyncIterable<Uint8Array>> => {
   const response = await fetchAuthorized(
     `${url}/git-upload-pack`,
@@ -348,6 +354,8 @@ const uploadPack = async (
     },
     { operation: "git-upload-pack", commands: [] },
     authorize,
+    undefined,
+    transport,
   );
   if (!response.ok || response.body === null) {
     throw new Error(`upload-pack returned ${response.status}`);
@@ -542,6 +550,7 @@ const negotiate = Effect.fn("Fetch.negotiate")(function* (input: {
   readonly depth: number | undefined;
 }) {
   const { authorize, capabilities, haves, token, url, wants } = input;
+  const transport = yield* Transport.current;
   let offered = 0;
   while (offered < haves.length) {
     const next = Math.min(offered + HAVES_PER_ROUND, haves.length);
@@ -560,6 +569,7 @@ const negotiate = Effect.fn("Fetch.negotiate")(function* (input: {
           }),
           signal,
           authorize,
+          transport,
         );
         const { lines } = await prelude(body);
         return acknowledged(lines);
@@ -597,6 +607,7 @@ export const requestPack = Effect.fn("Fetch.requestPack")(function* (input: {
   readonly capabilities?: ReadonlyArray<string> | undefined;
   readonly authorize?: Authorize | undefined;
 }) {
+  const transport = yield* Transport.current;
   const controller = yield* Effect.acquireRelease(
     Effect.sync(() => new AbortController()),
     (controller) => Effect.sync(() => controller.abort()),
@@ -619,6 +630,7 @@ export const requestPack = Effect.fn("Fetch.requestPack")(function* (input: {
         }),
         controller.signal,
         input.authorize,
+        transport,
       );
       return await prelude(body);
     },

@@ -11,8 +11,13 @@
  * already stripped. Matching never reads a body, so a large push or LFS upload
  * reaches its handler as the stream it arrived as.
  */
-import { Context, Effect, Layer } from "effect";
-import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
+import { ByteSize, Context, Effect, Layer } from "effect";
+import {
+  HttpIncomingMessage,
+  HttpRouter,
+  HttpServerRequest,
+  HttpServerResponse,
+} from "effect/http";
 
 import { type GitError, statusOf } from "../git/Error.ts";
 import type { Repository } from "../git/Repository.ts";
@@ -22,6 +27,8 @@ import type * as Auth from "./Auth.ts";
 import * as CommitPack from "./CommitPack.ts";
 import * as Lfs from "./Lfs.ts";
 import * as Protocol from "./Protocol.ts";
+import { defaults } from "./RequestLimits.ts";
+import { Transport } from "../client/Transport.ts";
 import { MAX_SEGMENT } from "./Route.ts";
 import type { Subscribers } from "./Subscribers.ts";
 
@@ -95,6 +102,10 @@ export type Services = Repository | Lfs.LfsStore | Subscribers | Auth.AnonymousW
 export const handler = <E, P = never>(options: {
   /** `Api.layer(...)`, built by the host so it names its resolver. */
   readonly api: ReturnType<typeof Api.layer>;
+  /** Bounds buffered JSON parsing; raw streaming routes retain their own budgets. */
+  readonly jsonBodyBytes?: number;
+  /** Host-enforced outbound transport for remote operations. */
+  readonly transport?: typeof globalThis.fetch;
   /** `provideMerge`d under both, since route requirements are request-scoped. */
   readonly services: Layer.Layer<Services, E>;
   /** Services only the smart-HTTP and LFS routes see, never the JSON API. */
@@ -123,7 +134,15 @@ export const handler = <E, P = never>(options: {
           if (request.source instanceof Request && request.source.signal.aborted) {
             return yield* Effect.interrupt;
           }
-          return yield* effect;
+          const bounded = effect.pipe(
+            Effect.provideService(
+              HttpIncomingMessage.MaxBodySize,
+              ByteSize.bytes(options.jsonBodyBytes ?? defaults.jsonBodyBytes),
+            ),
+          );
+          return yield* options.transport === undefined
+            ? bounded
+            : bounded.pipe(Effect.provideService(Transport, { fetch: options.transport }));
         }),
     },
   );

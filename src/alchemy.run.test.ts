@@ -15,6 +15,35 @@ import { Effect, Predicate } from "effect";
 import harness from "../wrangler.test.json" with { type: "json" };
 
 describe("alchemy stack", () => {
+  it.effect("bounds abandoned uploads without expiring completed repository data", () =>
+    Effect.promise(async () => {
+      const { lifecycleRules } = await import("./objects.ts");
+      assert.ok(
+        lifecycleRules.some(
+          (rule) =>
+            rule.enabled === true &&
+            rule.prefix === "" &&
+            rule.abortMultipartUploadsTransition?.condition?.type === "Age" &&
+            rule.abortMultipartUploadsTransition.condition.maxAge > 0 &&
+            rule.abortMultipartUploadsTransition.condition.maxAge <= 7 * 24 * 60 * 60,
+        ),
+        "all incomplete uploads need cleanup eligibility no later than seven days",
+      );
+      for (const rule of lifecycleRules) {
+        assert.equal(
+          rule.deleteObjectsTransition,
+          undefined,
+          "completed Git/LFS objects must not expire",
+        );
+        assert.equal(
+          rule.storageClassTransitions,
+          undefined,
+          "cleanup must not change object storage class",
+        );
+      }
+    }),
+  );
+
   it.effect("builds the resource graph: bucket, durable object, worker", () =>
     Effect.promise(async () => {
       const [stack, worker, host, objects] = await Promise.all([
@@ -46,7 +75,15 @@ describe("alchemy stack", () => {
       // `wrangler.test.json` pins the workerd the contract suite runs in;
       // `worker.ts` pins what alchemy deploys. If they drift, the tests pass
       // against one runtime and production runs another.
-      const { compatibility } = await import("./worker.ts");
+      const { compatibility, observability } = await import("./worker.ts");
+      assert.ok(
+        compatibility.flags.includes("global_fetch_strictly_public"),
+        "global fetch must not bypass same-zone public routing and security",
+      );
+      assert.equal(observability.logs.enabled, true);
+      assert.equal(observability.logs.invocationLogs, false, "no automatic request-detail logs");
+      assert.equal(observability.redactQueryString, true);
+      assert.equal(observability.traces.enabled, false);
       assert.equal(harness.compatibility_date, compatibility.date, "same compatibility date");
       assert.deepEqual(
         harness.compatibility_flags,

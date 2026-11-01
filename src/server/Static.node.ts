@@ -25,6 +25,7 @@ import { extname, join, normalize, resolve, sep } from "node:path";
 import { Predicate } from "effect";
 
 import { UI_PREFIX } from "./Route.ts";
+import { headers as securityHeaders } from "./UiSecurity.ts";
 
 /** The extensions the built UI actually emits; anything else is a byte stream. */
 export const mimeOf = (extension: string): string => {
@@ -191,6 +192,7 @@ export const assetResponse = async (
   // client route carries no extension of its own and was answered with the
   // page, so it is typed as the page rather than as a byte stream.
   const headers = {
+    ...securityHeaders,
     "content-type": mimeOf(extname(decodedPath(served) ?? served)),
     "content-length": String(bytes.byteLength),
   };

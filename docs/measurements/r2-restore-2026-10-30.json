@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-30",
+  "kind": "resumable-r2-restore",
+  "sourceSha256": {
+    "tools/copy-r2-backup.ts": "0d212829553c891b34242269091fe5b23707f633156101d700c8ddda3888eb6f",
+    "src/host/R2Backup.test.ts": "5478a01e61c8e96fdda646e7720cd233ae3f8b310c296a2ebc632c7bef94dd5f",
+    "src/host/BackupCodec.test.ts": "56f18cdb97100fbc3756e66ec69c0476053bd2349f54a35243885039519bd970",
+    "tools/cloudflare-namespace-archive.ts": "081fa699f4ef754c9dc79dae8b31df44a52731cf8285dbf46cf0dc158ae8169b"
+  },
+  "tests": {
+    "node24.12.0": {
+      "files": 2,
+      "passed": 3,
+      "logSha256": "46e0ddf7fe9ee61c32c1e532bafd25cf3a7be25cf0cc99542f12638e4158ceb0"
+    },
+    "node26.10.0": {
+      "files": 2,
+      "passed": 3,
+      "logSha256": "6f51f372ae524c680ed3531498adfc601974a6199ac6753a8a79db8b3615e1b1"
+    }
+  },
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "241845eb85f5c34ca0aba346d8df311a91937cc3b18e1c59d6e40a556108b3eb"
+  },
+  "coverage": [
+    "Read-only streamed R2 content/metadata inventory matches existing version-2 copy reports.",
+    "Restore validates the archive inventory before writing any destination object.",
+    "Lost PUT acknowledgement resumes by copying only missing keys; completed retries preserve versions and perform no writes.",
+    "Existing corrupt content/metadata and concurrent replacement fail without overwriting those objects.",
+    "Full destination inventory rejects unrelated keys while preserving them.",
+    "Native namespace recovery uses signed expected R2 evidence before restoring repository and authorization objects."
+  ],
+  "limits": [
+    "Caller must authenticate expected inventory and isolate all source/destination writers.",
+    "Global target mapping and durable namespace restore/release orchestration remain open.",
+    "Single-PUT object path and page budgets require production qualification; multipart transfer/resume is not implemented.",
+    "No Cloudflare account deployment or production recovery was performed."
+  ]
+}

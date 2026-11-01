@@ -10,43 +10,218 @@ permissions:
 jobs:
   unit:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [24.12.0, 26]
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v6
         with:
-          node-version: 26
+          node-version: ${{ matrix.node }}
           cache: npm
+      - run: tools/install-git-baseline.sh
       - run: npm ci
       # worker-configuration.d.ts is gitignored; lint typeCheck needs it.
       - run: npm run codegen
       - run: npm run check
       - run: npm run docs:cli:check
       - run: npx playwright install --with-deps chromium
-      - run: npm run test:unit
+      - run: node tools/release-preflight.ts source
+      - run: npm run test:unit -- --reporter=default --reporter=./tools/release-test-reporter.ts
+      - run: npm run verify:worker -- "$RUNNER_TEMP/worker-bundle.json"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: worker-bundle-node-${{ matrix.node }}
+          path: ${{ runner.temp }}/worker-bundle.json
+          if-no-files-found: error
+          retention-days: 30
 
   integration:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [24.12.0, 26]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: 26
+          node-version: ${{ matrix.node }}
           cache: npm
+      - run: tools/install-git-baseline.sh
+      - run: git --version | grep --fixed-strings "git version 2.56.0"
       - run: npm ci
       - run: npm run codegen
-      - run: npm run test:integration
+      - run: npm run test:integration -- --reporter=default --reporter=./tools/release-test-reporter.ts
+
+  browsers:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [24.12.0, 26]
+        browser: [chromium, firefox, webkit]
+    env:
+      GIT_TEST_BROWSER: ${{ matrix.browser }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: tools/install-git-baseline.sh
+      - run: npm ci
+      - run: npm run codegen
+      - run: npx playwright install --with-deps "${GIT_TEST_BROWSER}"
+      - run: npm run build:ui
+      - name: Record browser and runtime revisions
+        run: |
+          node --version > "$RUNNER_TEMP/browser-runtime.txt"
+          git --version >> "$RUNNER_TEMP/browser-runtime.txt"
+          cp node_modules/playwright-core/browsers.json "$RUNNER_TEMP/browser-revisions.json"
+      - name: Verify the production UI and local Git workflow
+        run: |
+          set -o pipefail
+          node src/ui/verify.ts --browser "$GIT_TEST_BROWSER" 2>&1 | tee "$RUNNER_TEMP/browser-ui.log"
+      - name: Verify identity persistence and storage refusal without skips
+        run: |
+          set -o pipefail
+          node_modules/.bin/vp test run --project interop src/ui/identity.interop.test.ts --reporter=default --reporter=./tools/release-test-reporter.ts 2>&1 | tee "$RUNNER_TEMP/browser-identity.log"
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: browser-${{ matrix.browser }}-node-${{ matrix.node }}
+          path: |
+            ${{ runner.temp }}/browser-runtime.txt
+            ${{ runner.temp }}/browser-revisions.json
+            ${{ runner.temp }}/browser-ui.log
+            ${{ runner.temp }}/browser-identity.log
+          if-no-files-found: error
 
   compatibility:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [24.12.0, 26]
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v6
         with:
+          # SEA embeds its build runtime; source compatibility is tested below.
           node-version: 26
           cache: npm
       - run: tools/install-git-baseline.sh
       - run: git --version | grep --fixed-strings "git version 2.56.0"
       - run: npm ci
       - run: npm run build:sea
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
       - run: npx playwright install --with-deps chromium
-      - run: npm run test:interop
+      - run: node tools/release-preflight.ts standalone
+      # These unit cases also exercise the installed binary when it exists.
+      # The source-only unit job cannot cover that branch before build:sea.
+      - run: node_modules/.bin/vp test run --project unit src/cli/Work.regression.test.ts --reporter=default --reporter=./tools/release-test-reporter.ts
+      - run: npm run test:interop -- --reporter=default --reporter=./tools/release-test-reporter.ts
+      - name: Verify Linux archive without Node or source
+        run: |
+          node tools/package-standalone.ts --rehearsal
+          archives=(dist/releases/*-rehearsal.tar.gz)
+          test "${#archives[@]}" -eq 1
+          bash tools/verify-standalone-container.sh "${archives[0]}" "$RUNNER_TEMP/standalone-installation.json"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: standalone-installation-node-${{ matrix.node }}
+          path: ${{ runner.temp }}/standalone-installation.json
+          if-no-files-found: error
+      # Artifact certification requires the embedded Node 26 build runtime.
+      # The Node 24 leg above verifies source compatibility with the same SEA.
+      - if: startsWith(github.ref, 'refs/tags/v') && matrix.node == 26
+        run: node tools/release-preflight.ts release
+      - if: startsWith(github.ref, 'refs/tags/v') && matrix.node == 26
+        run: node tools/package-standalone.ts
+      - name: Verify exact tagged archive without Node or source
+        if: startsWith(github.ref, 'refs/tags/v') && matrix.node == 26
+        run: |
+          platform="$(node -p 'process.platform + "-" + process.arch')"
+          archives=(dist/releases/*-"$platform".tar.gz)
+          test "${#archives[@]}" -eq 1
+          test -f "${archives[0]}"
+          bash tools/verify-standalone-container.sh "${archives[0]}" "$RUNNER_TEMP/release-installation.json"
+          mkdir dist/release-candidate
+          cp -- "${archives[0]}" "${archives[0]}.sha256" "$RUNNER_TEMP/release-installation.json" dist/release-candidate/
+          node tools/verify-candidate-handoff.ts dist/release-candidate "$(git rev-parse HEAD)" "$(node -p 'require("./package.json").version')"
+      - uses: actions/upload-artifact@v6
+        if: startsWith(github.ref, 'refs/tags/v') && matrix.node == 26
+        with:
+          name: candidate-intermediate
+          path: dist/release-candidate/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release_candidate:
+    name: Retain verified release candidate
+    if: github.repository == 'chr33s/git' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [unit, integration, browsers, compatibility]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v6
+        with:
+          name: candidate-intermediate
+          path: dist/release-candidate
+      - name: Verify downloaded bytes and installation evidence
+        run: node tools/verify-candidate-handoff.ts dist/release-candidate "$(git rev-parse HEAD)" "$(node -p 'require("./package.json").version')"
+      - name: Attest the verified candidate archive
+        id: provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/release-candidate/*.tar.gz
+      - name: Verify candidate provenance before final retention
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ATTESTATION_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: |
+          archives=(dist/release-candidate/*.tar.gz)
+          test "${#archives[@]}" -eq 1
+          test -f "${archives[0]}"
+          test -f "$ATTESTATION_BUNDLE"
+          mkdir "$RUNNER_TEMP/candidate-provenance"
+          gh attestation verify "${archives[0]}" \
+            --bundle "$ATTESTATION_BUNDLE" \
+            --repo chr33s/git \
+            --signer-workflow chr33s/git/.github/workflows/ci.yml \
+            --source-digest "$(git rev-parse HEAD)" \
+            --signer-digest "$(git rev-parse HEAD)" \
+            --source-ref "$GITHUB_REF" \
+            --deny-self-hosted-runners \
+            --format json > "$RUNNER_TEMP/candidate-provenance/verification.json"
+          cp -- "$ATTESTATION_BUNDLE" "$RUNNER_TEMP/candidate-provenance/attestation.json"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: verified-candidate-provenance
+          path: ${{ runner.temp }}/candidate-provenance/*
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@v6
+        with:
+          name: verified-release-candidate
+          path: dist/release-candidate/*
+          if-no-files-found: error
+          retention-days: 30

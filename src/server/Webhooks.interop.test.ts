@@ -100,7 +100,7 @@ describe.skipIf(!hasGit)("webhook delivery on push", () => {
 
   beforeAll(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), "git-webhook-interop-"));
-    server = await serve({ root, allowAnonymousWrites: true });
+    server = await serve({ root, allowAnonymousWrites: true, allowLoopbackEgress: true });
   });
 
   afterAll(async () => {
@@ -208,7 +208,11 @@ describe.skipIf(!hasGit)("webhook delivery on push", () => {
 
         // A second server over the same root is what an eviction or a redeploy
         // looks like from the registry's point of view.
-        const restarted = await serve({ root, allowAnonymousWrites: true });
+        const restarted = await serve({
+          root,
+          allowAnonymousWrites: true,
+          allowLoopbackEgress: true,
+        });
         try {
           // SAFETY: the list endpoint replies with the registry's rows; a
           // reply of any other form fails the deep equality below.

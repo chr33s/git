@@ -47,6 +47,7 @@ import { Context, Effect, Option } from "effect";
 
 import type { Fingerprint } from "../crypto/SshSignature.ts";
 import * as Dag from "../git/Dag.ts";
+import * as TraversalBudget from "../git/TraversalBudget.ts";
 import { Repository } from "../git/Repository.ts";
 import { type Oid, storageOf } from "../git/Store.ts";
 import * as Record from "../trust/Record.ts";
@@ -1167,6 +1168,7 @@ export const withheld = Effect.fn("hub.Redaction.withheld")(function* (target: O
  */
 export const covered = Effect.fn("hub.Redaction.covered")(function* () {
   const repository = yield* Repository;
+  const budget = yield* TraversalBudget.current;
 
   // Memoised for the same reason `excluded` is, and more urgently: this is the
   // set a *deepening fetch* takes, and a deepening fetch is a request an
@@ -1180,6 +1182,8 @@ export const covered = Effect.fn("hub.Redaction.covered")(function* () {
   // enters it, and a moved ref changes the key.
   const refs = yield* Event.pullRequests();
   const written = yield* recordRefs();
+  // Cache hits still resolve every ref to validate the cached answer.
+  yield* budget.spend(refs.length + written.length);
   // The storage as well as the genesis: an origin and its mirror under one
   // host share the genesis oid, and right after a replication the hub ref oids
   // too — while what they can read need not agree, since refs are applied

@@ -324,8 +324,8 @@ export const noWidenThenAssertRule = defineRule({
         'Binding "{{name}}" discards type evidence and later recreates it with an assertion. Keep the precise type from initialization through use; parse boundary input once.',
     },
   },
-  create(context) {
-    const scopes = context.sourceCode.scopeManager.scopes;
+  createOnce(context) {
+    let scopes: Parameters<typeof resolvedVariableForIdentifier>[0] = [];
 
     const checkAssertion = (node: ESTree.TSAsExpression | ESTree.TSTypeAssertion) => {
       const expression = assertedExpression(node);
@@ -356,6 +356,9 @@ export const noWidenThenAssertRule = defineRule({
     };
 
     return {
+      Program() {
+        scopes = context.sourceCode.scopeManager.scopes;
+      },
       TSAsExpression: checkAssertion,
       TSTypeAssertion: checkAssertion,
     };

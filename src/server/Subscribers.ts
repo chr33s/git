@@ -14,6 +14,7 @@ import { Context, Effect, Layer, Schema } from "effect";
 
 import { Invalid, StorageFailure } from "../git/Error.ts";
 import type { Sql } from "../git/Sql.ts";
+import * as RegistryCapacity from "./RegistryCapacity.ts";
 import { outboundUrl } from "../text.ts";
 
 export interface Subscriber {
@@ -154,7 +155,11 @@ const rowOf = (row: Row): Subscriber => ({
  * input gate serializes writes to it for the same reason it serializes
  * `RefStore.apply`.
  */
-export const sql = (db: Sql, repo: string): Layer.Layer<Subscribers> =>
+export const sql = (
+  db: Sql,
+  repo: string,
+  capacity: RegistryCapacity.Limits = RegistryCapacity.defaults,
+): Layer.Layer<Subscribers> =>
   Layer.sync(Subscribers, () => {
     // Scoped by repo rather than assuming one per database: a Durable Object
     // holds one repository in practice, but the stores are keyed by name and
@@ -169,8 +174,12 @@ export const sql = (db: Sql, repo: string): Layer.Layer<Subscribers> =>
       )
     `);
 
+    db.exec("CREATE INDEX IF NOT EXISTS webhooks_repo ON webhooks (repo)");
+
     const failed = (operation: string) => (cause: unknown) =>
-      new StorageFailure({ operation, path: `webhooks/${repo}`, cause });
+      cause instanceof StorageFailure
+        ? cause
+        : new StorageFailure({ operation, path: `webhooks/${repo}`, cause });
 
     const all = Effect.try({
       try: () =>
@@ -192,18 +201,23 @@ export const sql = (db: Sql, repo: string): Layer.Layer<Subscribers> =>
             Effect.try({
               try: () => {
                 const subscriber = subscriberOf(input);
-                db.exec(
-                  `INSERT INTO webhooks (id, repo, url, secret, created_at) VALUES (?, ?, ?, ?, ?)`,
-                  subscriber.id,
+                RegistryCapacity.insert(
+                  db,
+                  "webhooks",
                   repo,
-                  subscriber.url,
-                  subscriber.secret,
-                  subscriber.createdAt.toISOString(),
+                  [
+                    subscriber.id,
+                    repo,
+                    subscriber.url,
+                    subscriber.secret,
+                    subscriber.createdAt.toISOString(),
+                  ],
+                  capacity,
                 );
                 return subscriber;
               },
               catch: failed("subscribers.add"),
-            }),
+            }).pipe(Effect.tapError(RegistryCapacity.report("webhooks"))),
           ),
         ),
       remove: (id) =>

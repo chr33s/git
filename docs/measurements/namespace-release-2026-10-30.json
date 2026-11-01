@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-30",
+  "kind": "durable-namespace-release",
+  "sourceSha256": {
+    "tools/cloudflare-namespace-release.ts": "368149f7f12525eb800258b89264411629ed0a7b86f5f24b81bf6e02bf2fed6a",
+    "tools/cloudflare-namespace-restore.ts": "330bcb21da96d5f42d611c6a1268c01bf08c8514fa186130877b2d689dbf5f92",
+    "tools/cloudflare-restore-journal.ts": "9436dc026bda1e243ad974faabd98fe347e5397c5f477edd796365e2ad4973a6",
+    "src/host/CloudflareBackupAdmin.ts": "a3e7e9a7b046d61f79b32c391f5db874c5ee524e162b677d34359144a3c4c627",
+    "src/host/CloudflareBackupFence.ts": "173b56343586e74984c5dce713779307ce2cb9cdda6f2be1c5706a16ddc0b1da",
+    "src/host/BackupCodec.test.ts": "09c56d08d45ec2e601748664a31be69c9ec6e48c1833332da2d4ec09cf4bdff5",
+    "src/host/RestoreJournal.process.test.ts": "ba9fb7859dc8cb017800743ee7bc091eb1c3ba2db1f99c62910f73d1d4b70770"
+  },
+  "tests": {
+    "node24.12.0": {
+      "files": 2,
+      "passed": 8,
+      "logSha256": "af86b260f8767a8a6823aa51e023b46fb02c42c0d6ae5fb787513f8df9d1088d"
+    },
+    "node26.10.0": {
+      "files": 2,
+      "passed": 8,
+      "logSha256": "db073ccb51ce4397a43df07c8968b5916d30c4646f20c9db8ab20622326904e4"
+    }
+  },
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "1e99e894b2512e57cbd0b651fb2dac6cdf7f538b7ae04f719ee3bac92d5bf947"
+  },
+  "coverage": [
+    "Incomplete restore journal rejects release before RPC.",
+    "Changed mapping, target identity, malformed verification digest and extra R2 data reject before RPC.",
+    "All remote completion receipts must match before any retirement.",
+    "Lost successful retirement acknowledgement preserves both fences and durable releasing intent.",
+    "Changed verification digest and restarting import are rejected after release intent.",
+    "All retirements complete before the first Release call.",
+    "Lost successful Release acknowledgement resumes after eviction without replaying retirement.",
+    "Completed release opens both targets, preserves source fences and terminal retries make no target RPCs.",
+    "Original native application/LFS and registry/authorization comparisons occur before release.",
+    "Existing journal SIGKILL and private-path regressions pass with the added release tables."
+  ],
+  "limits": [
+    "Caller supplies trusted bindings and must retain installation-wide isolation through all partial releases and retries.",
+    "Verification digest binds an operator report; the component does not independently assess or authenticate report contents.",
+    "Terminal completion is historical evidence, not a current-state health check.",
+    "Local tests do not qualify full remote coordinator process death, power loss, production routes or a deployed recovery.",
+    "Operator command integration, production limits, global isolation and deployed recovery remain open."
+  ]
+}

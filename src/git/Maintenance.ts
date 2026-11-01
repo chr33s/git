@@ -11,6 +11,7 @@
  * hides. One walk, so "reachable" means the same thing in every one of them.
  */
 import { Effect, Result, Stream } from "effect";
+import * as TraversalBudget from "./TraversalBudget.ts";
 
 import { Invalid, ObjectNotFound, StorageFailure } from "./Error.ts";
 import {
@@ -99,6 +100,8 @@ export const reachable = (
   },
 ) =>
   Effect.gen(function* () {
+    const budget = yield* TraversalBudget.current;
+    yield* budget.spend(roots.length);
     const seen = new Set<Oid>();
     const order: Oid[] = [];
     const kinds = new Map<Oid, { type: RawObject["type"]; size: number }>();
@@ -114,7 +117,11 @@ export const reachable = (
       const object = yield* objects.read(oid).pipe(
         Effect.map((value): RawObject | null => value),
         Effect.catchTag("ObjectNotFound", (error) =>
-          tolerant ? Effect.succeed(null) : Effect.fail(error),
+          oid === EMPTY_TREE_OID
+            ? Effect.succeed<RawObject>({ type: "tree", data: new Uint8Array() })
+            : tolerant
+              ? Effect.succeed(null)
+              : Effect.fail(error),
         ),
       );
       if (object === null) continue;
@@ -127,6 +134,9 @@ export const reachable = (
         case "commit": {
           const commit = yield* Effect.fromResult(parseCommit(object.data)).pipe(
             Effect.mapError(() => new ObjectNotFound({ oid })),
+          );
+          yield* budget.spend(
+            1 + (options.boundary?.has(oid) === true ? 0 : commit.parents.length),
           );
           stack.push(commit.tree);
           // One at a time: a commit names as many parents as its author
@@ -145,6 +155,7 @@ export const reachable = (
           // unequal here and its commit — an object in another repository —
           // was pushed onto the walk, so every clone of that repository
           // failed on an object it was never supposed to have.
+          yield* budget.spend(entries.length);
           for (const entry of entries) {
             if (isGitlink(entry.mode)) continue;
             stack.push(entry.oid);
@@ -154,7 +165,10 @@ export const reachable = (
         }
         case "tag": {
           const target = tagTarget(object.data);
-          if (target !== null) stack.push(target);
+          if (target !== null) {
+            yield* budget.spend(1);
+            stack.push(target);
+          }
           break;
         }
         case "blob":
@@ -177,59 +191,79 @@ export interface FsckReport {
   readonly danglingRefs: ReadonlyArray<{ readonly ref: string; readonly oid: Oid }>;
 }
 
-export const fsck = Effect.fn("Maintenance.fsck")(function* (stores: Stores) {
-  const { objects, refs } = stores;
-  const problems: FsckProblem[] = [];
-  let checked = 0;
+export const fsck = Effect.fn("Maintenance.fsck")(
+  function* (stores: Stores) {
+    const { objects, refs } = stores;
+    const problems: FsckProblem[] = [];
+    let checked = 0;
 
-  yield* Stream.runForEach(objects.list, (oid) =>
-    Effect.gen(function* () {
-      checked++;
-      const object = yield* objects.read(oid).pipe(
-        Effect.map((value): RawObject | null => value),
-        Effect.catchTag("ObjectNotFound", () => {
-          problems.push({ oid, problem: "listed but unreadable" });
-          return Effect.succeed(null);
-        }),
+    yield* Stream.runForEach(objects.list, (oid) =>
+      Effect.gen(function* () {
+        checked++;
+        const object = yield* objects.read(oid).pipe(
+          Effect.map((value): RawObject | null => value),
+          Effect.catchTag("ObjectNotFound", () => {
+            problems.push({ oid, problem: "listed but unreadable" });
+            return Effect.succeed(null);
+          }),
+        );
+        if (object === null) return;
+
+        // The name is the hash of the content: if they disagree, the
+        // bytes changed underneath the store.
+        const actual = yield* hashObject(object);
+        if (actual !== oid) {
+          problems.push({ oid, problem: `hash mismatch: content hashes to ${actual}` });
+          return;
+        }
+
+        // A blob is bytes and has no structure to be wrong about; the
+        // other three do, and the codec is the checker.
+        const structure: Result.Result<unknown, Invalid> | null =
+          object.type === "commit"
+            ? parseCommit(object.data)
+            : object.type === "tree"
+              ? parseTree(object.data)
+              : object.type === "tag"
+                ? parseTag(object.data)
+                : null;
+        if (structure !== null && Result.isFailure(structure)) {
+          problems.push({
+            oid,
+            problem: `malformed ${object.type}: ${structure.failure.reason}`,
+          });
+        }
+      }),
+    );
+
+    // A ref pointing at nothing is the other half of integrity, and the
+    // half a per-object walk cannot see.
+    const danglingRefs: Array<{ ref: string; oid: Oid }> = [];
+    for (const [ref, oid] of yield* refs.list("refs/")) {
+      if (oid !== EMPTY_TREE_OID && !(yield* objects.has(oid))) danglingRefs.push({ ref, oid });
+    }
+
+    if (problems.length > 0 || danglingRefs.length > 0)
+      yield* Effect.logError(
+        "Repository integrity check found damage; preserve storage and investigate",
+        {
+          component: "git.Maintenance",
+          operation: "fsck",
+          event: "integrity_failed",
+          problems: problems.length,
+          danglingRefs: danglingRefs.length,
+        },
       );
-      if (object === null) return;
-
-      // The name is the hash of the content: if they disagree, the
-      // bytes changed underneath the store.
-      const actual = yield* hashObject(object);
-      if (actual !== oid) {
-        problems.push({ oid, problem: `hash mismatch: content hashes to ${actual}` });
-        return;
-      }
-
-      // A blob is bytes and has no structure to be wrong about; the
-      // other three do, and the codec is the checker.
-      const structure: Result.Result<unknown, Invalid> | null =
-        object.type === "commit"
-          ? parseCommit(object.data)
-          : object.type === "tree"
-            ? parseTree(object.data)
-            : object.type === "tag"
-              ? parseTag(object.data)
-              : null;
-      if (structure !== null && Result.isFailure(structure)) {
-        problems.push({
-          oid,
-          problem: `malformed ${object.type}: ${structure.failure.reason}`,
-        });
-      }
+    return { checked, problems, danglingRefs } satisfies FsckReport;
+  },
+  Effect.tapError(() =>
+    Effect.logError("Integrity check could not finish; inspect storage before retrying", {
+      component: "git.Maintenance",
+      operation: "fsck",
+      event: "maintenance_failed",
     }),
-  );
-
-  // A ref pointing at nothing is the other half of integrity, and the
-  // half a per-object walk cannot see.
-  const danglingRefs: Array<{ ref: string; oid: Oid }> = [];
-  for (const [ref, oid] of yield* refs.list("refs/")) {
-    if (oid !== EMPTY_TREE_OID && !(yield* objects.has(oid))) danglingRefs.push({ ref, oid });
-  }
-
-  return { checked, problems, danglingRefs } satisfies FsckReport;
-});
+  ),
+);
 
 /**
  * The emission order the delta window wants: same-type objects grouped,
@@ -379,235 +413,244 @@ export interface GcReport {
  */
 export const REFLOG_GRACE_MS = 90 * 24 * 60 * 60 * 1000;
 
-export const gc = Effect.fn("Maintenance.gc")(function* (
-  stores: Stores & { readonly packs: PackStore["Service"] },
-  options?: {
-    readonly dryRun?: boolean;
-    readonly repack?: boolean;
-    /** Milliseconds; `0` collects everything only the reflog still names. */
-    readonly reflogGrace?: number;
+export const gc = Effect.fn("Maintenance.gc")(
+  function* (
+    stores: Stores & { readonly packs: PackStore["Service"] },
+    options?: {
+      readonly dryRun?: boolean;
+      readonly repack?: boolean;
+      /** Milliseconds; `0` collects everything only the reflog still names. */
+      readonly reflogGrace?: number;
+      /**
+       * Objects a ref may name and still not protect.
+       *
+       * Redaction's other half. A tombstoned payload blob is still referenced by
+       * the tree of the commit that carried it — that structure has to survive,
+       * or every later event's hash breaks — so reachability alone would protect
+       * the content forever. Excluding it here is what lets a repack drop the
+       * pack copy, which is the only way a packed object is ever removed.
+       */
+      readonly exclude?: ReadonlySet<Oid>;
+    },
+  ) {
+    const { objects, packs, refs } = stores;
+    const boundary = yield* refs.shallow;
+
+    // Asked once, before anything is deleted: a fork reads these objects
+    // through git's `alternates` and keeps no copy of them, and its refs cannot
+    // be seen from here — so collecting would destroy history it still
+    // advertises. Answered as a refusal the caller can act on, not as a failure
+    // part-way through a deletion loop.
+    const shared = objects.shared === undefined ? null : yield* objects.shared;
+    if (shared !== null && shared.borrowers.length > 0) {
+      return yield* new Invalid({
+        field: "gc",
+        reason: `this repository lends its objects to ${shared.borrowers.join(", ")}; collect those first`,
+      });
+    }
+
+    const named = yield* refs.list("refs/");
+    /** Only refs gate the walk below; a reflog may name what a purge collected. */
+    const refRoots = named.map(([, oid]) => oid);
+    const roots = [...refRoots];
     /**
-     * Objects a ref may name and still not protect.
+     * The same roots, less the hub's own.
      *
-     * Redaction's other half. A tombstoned payload blob is still referenced by
-     * the tree of the commit that carried it — that structure has to survive,
-     * or every later event's hash breaks — so reachability alone would protect
-     * the content forever. Excluding it here is what lets a repack drop the
-     * pack copy, which is the only way a packed object is ever removed.
+     * An exclusion says the *hub* must not keep a payload alive; it does not say
+     * a branch may not. So the refs the exclusion is not about are walked a
+     * second time without it, and this is that root set — kept in step with
+     * `roots` rather than rebuilt from ref names, so it carries `HEAD` and the
+     * reflog entries too.
      */
-    readonly exclude?: ReadonlySet<Oid>;
-  },
-) {
-  const { objects, packs, refs } = stores;
-  const boundary = yield* refs.shallow;
+    const sourceRoots = named
+      .filter(([name]) => !Refspec.hiddenFromAdvertisement(name))
+      .map(([, oid]) => oid);
+    const head = yield* refs.resolve("HEAD");
+    if (head !== null) {
+      refRoots.push(head);
+      roots.push(head);
+      sourceRoots.push(head);
+    }
 
-  // Asked once, before anything is deleted: a fork reads these objects
-  // through git's `alternates` and keeps no copy of them, and its refs cannot
-  // be seen from here — so collecting would destroy history it still
-  // advertises. Answered as a refusal the caller can act on, not as a failure
-  // part-way through a deletion loop.
-  const shared = objects.shared === undefined ? null : yield* objects.shared;
-  if (shared !== null && shared.borrowers.length > 0) {
-    return yield* new Invalid({
-      field: "gc",
-      reason: `this repository lends its objects to ${shared.borrowers.join(", ")}; collect those first`,
+    // Where a ref has been, not only where it is. Without these, a reset or a
+    // force-push destroys the commit it moved off the moment gc next runs, and
+    // the reflog entry that was supposed to lead back to it dangles.
+    const cutoff = Date.now() - (options?.reflogGrace ?? REFLOG_GRACE_MS);
+    // Every ref that has a log, not only the refs that still exist: a branch
+    // deleted by mistake is precisely the case this protection is for, and it
+    // is gone from `list` the moment it is deleted.
+    const logs = new Set([...named.map(([ref]) => ref), ...(yield* refs.logged), "HEAD"]);
+    for (const name of logs) {
+      for (const entry of yield* refs.reflog(name)) {
+        const at = entry.at.getTime();
+        // Strictly newer than the cutoff, so a grace of `0` protects nothing
+        // even when the entry was written in this same millisecond. An entry
+        // whose timestamp will not parse is treated as expired rather than as
+        // infinitely young — otherwise one unreadable line pins a repository's
+        // garbage forever and no grace setting can release it.
+        if (Number.isNaN(at) || at <= cutoff) continue;
+        if (entry.from !== null) roots.push(entry.from);
+        if (entry.to !== null) roots.push(entry.to);
+        if (Refspec.hiddenFromAdvertisement(name)) continue;
+        if (entry.from !== null) sourceRoots.push(entry.from);
+        if (entry.to !== null) sourceRoots.push(entry.to);
+      }
+    }
+
+    // Tolerant: a ref pointing at a missing object is fsck's problem to
+    // report, not a reason to refuse to collect everything else. Classified
+    // only when a repack will consume it — classification is free inside the
+    // walk but pointless without one.
+    //
+    // Borrowed objects are in this walk but not in this repository: packing them
+    // here would copy the parent's whole history into the fork and undo the
+    // sharing a fork exists for.
+    const borrowing = (shared?.alternates.length ?? 0) > 0;
+    const willRepack = options?.repack === true && options?.dryRun !== true && !borrowing;
+    const walked = yield* reachable(objects, roots, {
+      boundary,
+      ignoreMissing: true,
+      classify: willRepack,
+      skip: options?.exclude,
     });
-  }
 
-  const named = yield* refs.list("refs/");
-  /** Only refs gate the walk below; a reflog may name what a purge collected. */
-  const refRoots = named.map(([, oid]) => oid);
-  const roots = [...refRoots];
-  /**
-   * The same roots, less the hub's own.
-   *
-   * An exclusion says the *hub* must not keep a payload alive; it does not say
-   * a branch may not. So the refs the exclusion is not about are walked a
-   * second time without it, and this is that root set — kept in step with
-   * `roots` rather than rebuilt from ref names, so it carries `HEAD` and the
-   * reflog entries too.
-   */
-  const sourceRoots = named
-    .filter(([name]) => !Refspec.hiddenFromAdvertisement(name))
-    .map(([, oid]) => oid);
-  const head = yield* refs.resolve("HEAD");
-  if (head !== null) {
-    refRoots.push(head);
-    roots.push(head);
-    sourceRoots.push(head);
-  }
+    // An exclusion says "the hub must not keep this alive", not "delete this".
+    // Git dedupes by content, so a redacted event payload can be byte-identical
+    // to a blob the source history also holds — post the comment, commit the
+    // same bytes as a file, have the comment redacted — and a skip applied to
+    // the *whole* walk then deleted an object `refs/heads/*` still reaches,
+    // leaving the source history dangling. So the refs the exclusion is not
+    // about are walked again without it, and what they reach survives.
+    const source =
+      (options?.exclude?.size ?? 0) === 0
+        ? null
+        : yield* reachable(objects, sourceRoots, {
+            ignoreMissing: true,
+            classify: willRepack,
+            boundary,
+          });
+    const keep = source === null ? walked.seen : new Set([...walked.seen, ...source.seen]);
+    const classified =
+      source === null
+        ? walked.classified
+        : {
+            kinds: new Map([...source.classified.kinds, ...walked.classified.kinds]),
+            names: new Map([...source.classified.names, ...walked.classified.names]),
+          };
 
-  // Where a ref has been, not only where it is. Without these, a reset or a
-  // force-push destroys the commit it moved off the moment gc next runs, and
-  // the reflog entry that was supposed to lead back to it dangles.
-  const cutoff = Date.now() - (options?.reflogGrace ?? REFLOG_GRACE_MS);
-  // Every ref that has a log, not only the refs that still exist: a branch
-  // deleted by mistake is precisely the case this protection is for, and it
-  // is gone from `list` the moment it is deleted.
-  const logs = new Set([...named.map(([ref]) => ref), ...(yield* refs.logged), "HEAD"]);
-  for (const name of logs) {
-    for (const entry of yield* refs.reflog(name)) {
-      const at = entry.at.getTime();
-      // Strictly newer than the cutoff, so a grace of `0` protects nothing
-      // even when the entry was written in this same millisecond. An entry
-      // whose timestamp will not parse is treated as expired rather than as
-      // infinitely young — otherwise one unreadable line pins a repository's
-      // garbage forever and no grace setting can release it.
-      if (Number.isNaN(at) || at <= cutoff) continue;
-      if (entry.from !== null) roots.push(entry.from);
-      if (entry.to !== null) roots.push(entry.to);
-      if (Refspec.hiddenFromAdvertisement(name)) continue;
-      if (entry.from !== null) sourceRoots.push(entry.from);
-      if (entry.to !== null) sourceRoots.push(entry.to);
-    }
-  }
-
-  // Tolerant: a ref pointing at a missing object is fsck's problem to
-  // report, not a reason to refuse to collect everything else. Classified
-  // only when a repack will consume it — classification is free inside the
-  // walk but pointless without one.
-  //
-  // Borrowed objects are in this walk but not in this repository: packing them
-  // here would copy the parent's whole history into the fork and undo the
-  // sharing a fork exists for.
-  const borrowing = (shared?.alternates.length ?? 0) > 0;
-  const willRepack = options?.repack === true && options?.dryRun !== true && !borrowing;
-  const walked = yield* reachable(objects, roots, {
-    boundary,
-    ignoreMissing: true,
-    classify: willRepack,
-    skip: options?.exclude,
-  });
-
-  // An exclusion says "the hub must not keep this alive", not "delete this".
-  // Git dedupes by content, so a redacted event payload can be byte-identical
-  // to a blob the source history also holds — post the comment, commit the
-  // same bytes as a file, have the comment redacted — and a skip applied to
-  // the *whole* walk then deleted an object `refs/heads/*` still reaches,
-  // leaving the source history dangling. So the refs the exclusion is not
-  // about are walked again without it, and what they reach survives.
-  const source =
-    (options?.exclude?.size ?? 0) === 0
-      ? null
-      : yield* reachable(objects, sourceRoots, {
-          ignoreMissing: true,
-          classify: willRepack,
-          boundary,
+    // What a pack holds cannot be deleted object by object, so an unreachable
+    // object that is packed is only reported as removed when a repack — which
+    // drops the packs it supersedes — is going to run.
+    const packedOids = new Set<Oid>();
+    const deltaBases = new Set<Oid>();
+    const handles = yield* packs.list;
+    const owned = new Set(handles);
+    const borrowed = packs.borrowed === undefined ? [] : yield* packs.borrowed;
+    for (const handle of [...handles, ...borrowed]) {
+      const parsed = parsePackIndex(handle.index);
+      if (parsed._tag === "Failure") {
+        return yield* new StorageFailure({
+          operation: "packs.list",
+          path: handle.name,
+          cause: parsed.failure,
         });
-  const keep = source === null ? walked.seen : new Set([...walked.seen, ...source.seen]);
-  const classified =
-    source === null
-      ? walked.classified
-      : {
-          kinds: new Map([...source.classified.kinds, ...walked.classified.kinds]),
-          names: new Map([...source.classified.names, ...walked.classified.names]),
-        };
-
-  // What a pack holds cannot be deleted object by object, so an unreachable
-  // object that is packed is only reported as removed when a repack — which
-  // drops the packs it supersedes — is going to run.
-  const packedOids = new Set<Oid>();
-  const deltaBases = new Set<Oid>();
-  const handles = yield* packs.list;
-  const owned = new Set(handles);
-  const borrowed = packs.borrowed === undefined ? [] : yield* packs.borrowed;
-  for (const handle of [...handles, ...borrowed]) {
-    const parsed = parsePackIndex(handle.index);
-    if (parsed._tag === "Failure") {
-      return yield* new StorageFailure({
-        operation: "packs.list",
-        path: handle.name,
-        cause: parsed.failure,
-      });
+      }
+      for (const entry of parsed.success) {
+        if (owned.has(handle)) packedOids.add(entry.oid);
+        const base = yield* Effect.tryPromise({
+          try: () => refDeltaBaseAt(handle.source, entry.offset),
+          catch: (cause) =>
+            new StorageFailure({ operation: "packs.dependencies", path: handle.name, cause }),
+        });
+        if (base !== null) deltaBases.add(base);
+      }
     }
-    for (const entry of parsed.success) {
-      if (owned.has(handle)) packedOids.add(entry.oid);
-      const base = yield* Effect.tryPromise({
-        try: () => refDeltaBaseAt(handle.source, entry.offset),
-        catch: (cause) =>
-          new StorageFailure({ operation: "packs.dependencies", path: handle.name, cause }),
-      });
-      if (base !== null) deltaBases.add(base);
-    }
-  }
 
-  /**
-   * Roots that lead nowhere are not a licence to delete.
-   *
-   * A repository with roots whose objects the store cannot read back is broken
-   * in a way `fsck` diagnoses, and every object in it would look unreachable —
-   * so the walk would name the whole store as garbage. Refusing here, before
-   * anything is deleted, is the difference between reporting a problem and
-   * being the problem. An empty repository has no roots at all and still
-   * collects normally.
-   */
-  // Reflog roots are deliberately not counted: a zero-grace purge leaves
-  // entries naming objects it just collected, and treating those as evidence
-  // of a broken store would wedge every later collection for the whole grace
-  // window.
-  if (refRoots.length > 0) {
-    // The refs' *own* walk, not the one the reflog roots also fed: a single
-    // readable reflog entry would otherwise disarm the guard for a store
-    // whose every ref is unreadable, and gc would sweep what was salvageable.
-    const fromRefs = yield* reachable(objects, refRoots, { ignoreMissing: true, boundary });
-    if (fromRefs.order.length === 0) {
-      return yield* new StorageFailure({
-        operation: "gc",
-        path: "refs",
-        cause: `refs name ${refRoots.length} object(s) this store cannot read; run fsck`,
-      });
+    /**
+     * Roots that lead nowhere are not a licence to delete.
+     *
+     * A repository with roots whose objects the store cannot read back is broken
+     * in a way `fsck` diagnoses, and every object in it would look unreachable —
+     * so the walk would name the whole store as garbage. Refusing here, before
+     * anything is deleted, is the difference between reporting a problem and
+     * being the problem. An empty repository has no roots at all and still
+     * collects normally.
+     */
+    // Reflog roots are deliberately not counted: a zero-grace purge leaves
+    // entries naming objects it just collected, and treating those as evidence
+    // of a broken store would wedge every later collection for the whole grace
+    // window.
+    if (refRoots.length > 0) {
+      // The refs' *own* walk, not the one the reflog roots also fed: a single
+      // readable reflog entry would otherwise disarm the guard for a store
+      // whose every ref is unreadable, and gc would sweep what was salvageable.
+      const fromRefs = yield* reachable(objects, refRoots, { ignoreMissing: true, boundary });
+      if (fromRefs.order.length === 0) {
+        return yield* new StorageFailure({
+          operation: "gc",
+          path: "refs",
+          cause: `refs name ${refRoots.length} object(s) this store cannot read; run fsck`,
+        });
+      }
     }
-  }
 
-  const unreachable: Oid[] = [];
-  let scanned = 0;
-  yield* Stream.runForEach(objects.list, (oid) =>
-    Effect.sync(() => {
-      scanned++;
-      if (keep.has(oid) || oid === EMPTY_TREE_OID) return;
-      unreachable.push(oid);
+    const unreachable: Oid[] = [];
+    let scanned = 0;
+    yield* Stream.runForEach(objects.list, (oid) =>
+      Effect.sync(() => {
+        scanned++;
+        if (keep.has(oid) || oid === EMPTY_TREE_OID) return;
+        unreachable.push(oid);
+      }),
+    );
+
+    const written = !willRepack
+      ? null
+      : yield* repack(
+          objects,
+          packs,
+          classified,
+          handles.map((handle) => handle.name),
+        );
+
+    // A retained ref-delta may need an otherwise unreachable loose object.
+    // Repack must finish reading those bases before any loose garbage is deleted;
+    // without a replacement pack, the bases remain storage dependencies.
+    const depends = (oid: Oid) => written === null && deltaBases.has(oid);
+    if (options?.dryRun !== true) {
+      for (const oid of unreachable) {
+        if (!depends(oid)) yield* objects.delete(oid);
+      }
+    }
+
+    // What survives is decided by what actually happened, not by what was asked
+    // for: an object inside a pack is gone only if that pack was superseded, and
+    // a repack that wrote nothing superseded nothing. Reporting it either way
+    // would tell a caller a secret was collected while it is still clonable.
+    const collected = (oid: Oid) => !depends(oid) && (!packedOids.has(oid) || written !== null);
+    const counted: GcReport = {
+      scanned,
+      reachable: keep.size,
+      removed: unreachable.filter(collected),
+      retained: unreachable.filter((oid) => !collected(oid)),
+    };
+    // Said only when a repack was asked for and declined, so an ordinary gc
+    // report does not carry an empty explanation of something that never came up.
+    const report: GcReport =
+      options?.repack === true && borrowing
+        ? {
+            ...counted,
+            repackSkipped:
+              "this repository borrows objects through alternates; packing them here would copy the history it shares",
+          }
+        : counted;
+    return written === null ? report : ({ ...report, packed: written } satisfies GcReport);
+  },
+  Effect.tapError(() =>
+    Effect.logError("Collection failed; preserve storage and inspect integrity before retrying", {
+      component: "git.Maintenance",
+      operation: "gc",
+      event: "maintenance_failed",
     }),
-  );
-
-  const written = !willRepack
-    ? null
-    : yield* repack(
-        objects,
-        packs,
-        classified,
-        handles.map((handle) => handle.name),
-      );
-
-  // A retained ref-delta may need an otherwise unreachable loose object.
-  // Repack must finish reading those bases before any loose garbage is deleted;
-  // without a replacement pack, the bases remain storage dependencies.
-  const depends = (oid: Oid) => written === null && deltaBases.has(oid);
-  if (options?.dryRun !== true) {
-    for (const oid of unreachable) {
-      if (!depends(oid)) yield* objects.delete(oid);
-    }
-  }
-
-  // What survives is decided by what actually happened, not by what was asked
-  // for: an object inside a pack is gone only if that pack was superseded, and
-  // a repack that wrote nothing superseded nothing. Reporting it either way
-  // would tell a caller a secret was collected while it is still clonable.
-  const collected = (oid: Oid) => !depends(oid) && (!packedOids.has(oid) || written !== null);
-  const counted: GcReport = {
-    scanned,
-    reachable: keep.size,
-    removed: unreachable.filter(collected),
-    retained: unreachable.filter((oid) => !collected(oid)),
-  };
-  // Said only when a repack was asked for and declined, so an ordinary gc
-  // report does not carry an empty explanation of something that never came up.
-  const report: GcReport =
-    options?.repack === true && borrowing
-      ? {
-          ...counted,
-          repackSkipped:
-            "this repository borrows objects through alternates; packing them here would copy the history it shares",
-        }
-      : counted;
-  return written === null ? report : ({ ...report, packed: written } satisfies GcReport);
-});
+  ),
+);

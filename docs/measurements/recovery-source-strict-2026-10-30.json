@@ -1,0 +1,66 @@
+{
+  "date": "2026-10-30",
+  "platform": "darwin",
+  "architecture": "arm64",
+  "git": "git version 2.56.0",
+  "head": "54c6199b79d3b121ad7964ac8d0edaeba85b4666",
+  "sourceState": "Uncommitted worktree; not a release artifact certification",
+  "sourceFingerprint": {
+    "algorithm": "sha256",
+    "selection": "git ls-files --cached --others --exclude-standard -- src tools patches package.json package-lock.json tsconfig.json vite.config.ts .github; unique sorted paths, path NUL contents NUL",
+    "files": 680,
+    "digest": "53fa70d9338a9680dc57bfea860fe33aabdfbe2d41bebd2e49d93aec930d0406",
+    "unchangedAcrossBothRuns": true
+  },
+  "results": [
+    {
+      "node": "26.10.0",
+      "command": "npm test -- --reporter=default --reporter=./tools/release-test-reporter.ts",
+      "exitCode": 0,
+      "files": 268,
+      "passed": 2787,
+      "skipped": 11,
+      "durationSeconds": 477.71,
+      "strictReporter": true,
+      "logSha256": "2b495e54081a0266fd4b288254965cc8fbff66b0aec112e4ecc95bbf7d6ff271"
+    },
+    {
+      "node": "24.12.0",
+      "command": "npm exec --yes --package=node@24.12.0 -- node node_modules/vite-plus/bin/vp test run --reporter=default --reporter=./tools/release-test-reporter.ts",
+      "exitCode": 0,
+      "files": 268,
+      "passed": 2787,
+      "skipped": 11,
+      "durationSeconds": 500.15,
+      "strictReporter": true,
+      "logSha256": "fa75b8c07e7f31ec897aa31886ae211442fdcfaf36a346543f139d551ba98618"
+    }
+  ],
+  "prerequisites": {
+    "node26": {
+      "passed": true,
+      "logSha256": "016b4abe7e86b60c226d0d03c33ad371c742f9e705cc6ae9a084469587ba875a"
+    },
+    "node24": {
+      "passed": true,
+      "logSha256": "998a049617d74b300aa1a93b97d33ecc190438069bf4f99a85659b5f2de29d78"
+    },
+    "scope": "standalone preflight: pinned Git/backend, SSH, Chromium, baseline commit, existing standalone CLI/helper and UI assets"
+  },
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "5ce96b9e5c857290d4f95af1ee4f0cb71e40c620818847bce4abcf79f3b3087b"
+  },
+  "coverage": [
+    "All unit, workerd integration and stock-Git/standalone interoperability projects.",
+    "Five authenticated stock-Git tests pass on both Node versions.",
+    "Includes namespace capture/restore/release, native SQL/KV/R2 recovery and journal process-death regressions.",
+    "Only the eleven documented macOS exclusions for Linux descriptor checks were skipped."
+  ],
+  "limitsOfEvidence": [
+    "macOS arm64 source suite only; expanded remote CI and target-account qualification remain open.",
+    "Existing standalone artifacts were exercised but were not rebuilt or certified for this fingerprint.",
+    "Ignored generated files and dist artifacts are outside the source fingerprint.",
+    "No deployment, publication, target-platform signing or installation-wide production recovery was performed."
+  ]
+}

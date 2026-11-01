@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "measuredAt": "2026-10-29T15:11:10.492Z",
+  "revision": "54c6199b79d3b121ad7964ac8d0edaeba85b4666",
+  "dirty": true,
+  "platform": "darwin",
+  "arch": "arm64",
+  "osRelease": "27.0.0",
+  "node": "v26.10.0",
+  "git": "git version 2.56.0",
+  "cpu": "Apple M5 Max",
+  "logicalCpus": 18,
+  "totalMemoryBytes": 137438953472,
+  "workload": {
+    "dataMiB": 64,
+    "commits": 64,
+    "concurrency": 8,
+    "packed": true,
+    "private": true,
+    "objects": "count: 0\nsize: 0\nin-pack: 264\npacks: 1\nsize-pack: 65583\nprune-packable: 0\ngarbage: 0\nsize-garbage: 0\n"
+  },
+  "requests": [
+    {
+      "milliseconds": 4338.962958,
+      "transferred": true,
+      "verified": true,
+      "failure": null
+    },
+    {
+      "milliseconds": 4895.032791,
+      "transferred": true,
+      "verified": true,
+      "failure": null
+    },
+    {
+      "milliseconds": 5335.4706670000005,
+      "transferred": true,
+      "verified": true,
+      "failure": null
+    },
+    {
+      "milliseconds": 5749.805375,
+      "transferred": true,
+      "verified": true,
+      "failure": null
+    },
+    {
+      "milliseconds": 6003.1192089999995,
+      "transferred": true,
+      "verified": true,
+      "failure": null
+    },
+    {
+      "milliseconds": 6199.920208,
+      "transferred": true,
+      "verified": true,
+      "failure": null
+    },
+    {
+      "milliseconds": 6340.1765,
+      "transferred": true,
+      "verified": true,
+      "failure": null
+    },
+    {
+      "milliseconds": 6461.815875000001,
+      "transferred": true,
+      "verified": true,
+      "failure": null
+    }
+  ],
+  "elapsedMs": 6473.373833000001,
+  "recoveryCloneVerified": true,
+  "host": {
+    "baselineRssBytes": 180338688,
+    "maxRssKiB": 437680,
+    "userCpuMicroseconds": 19196150,
+    "systemCpuMicroseconds": 2863048,
+    "fetchGraphSteps": 250000,
+    "limits": {
+      "active": 32,
+      "perRepository": 8,
+      "connections": 128,
+      "deadlineMs": 300000,
+      "idleMs": 30000,
+      "headersMs": 15000
+    }
+  },
+  "limitsOfEvidence": "One loopback burst; shared OS file cache; host metrics exclude Git clients and include recovery clone. Not a supported-size or saturation claim."
+}

@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-30",
+  "kind": "coordinated-namespace-capture",
+  "sourceSha256": {
+    "tools/cloudflare-namespace-archive.ts": "afe6aab439ccc49545bde43f32c2eb857fb03bb1faa1e3a6c2f6f0ab5f3ba2af",
+    "tools/cloudflare-object-archive.ts": "24867a97d430db8e349971eec0c0a6d4bb52d739c07d3428cad2571bf11e5000",
+    "tools/inventory-cloudflare-objects.ts": "177db424252261fccf63f8a5d803b28e17bc9512654c508127457cf230d51ca0",
+    "tools/copy-r2-backup.ts": "4f4b90b747f087ec0f711102b1a8aca90c3906cc47e5c78eee6c1e8691e4f48d",
+    "src/testing/BackupCodec.worker.ts": "7d99920d1f80d74ef6db60b38723df7d5aa272afec2df7b40987fc61c1457087",
+    "src/host/BackupCodec.test.ts": "eb97573b14cd05a218dd8c3914f2a4ca8bc973e2a78f859abd7d9d5cae606ca0",
+    "src/host/CloudflareInventory.test.ts": "041173557c679b96b2b7f9bfb3d8684a2dcb35e341217e335296db7ca35bd931"
+  },
+  "tests": {
+    "node24.12.0": {
+      "files": 2,
+      "passed": 21,
+      "logSha256": "7bd61d91c7d4e678ace4861f8ccc6c4bff54eaf5c3038c9a23a56e248f151b6e"
+    },
+    "node26.10.0": {
+      "files": 2,
+      "passed": 21,
+      "logSha256": "fbbffbb73e4c21e321c99c87501f7f68850b88b8670ceb9ae1c3637e50e43a16"
+    }
+  },
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "8006dc36de296b046b61b6b3c08ac255d59f10d64b6fc935212eb11f7f284688"
+  },
+  "coverage": [
+    "Verified discovery copied into private archive and checked before object RPC.",
+    "All listed source objects held before R2 copying and individual object capture.",
+    "Hold failure prevents R2 writes; page failure leaves partial output without namespace completion.",
+    "Signed namespace completion binds streamed per-object index, namespace/deployment evidence and verified R2 copy.",
+    "Native repository and authorization objects captured together with seven R2 objects and restored into fresh storage.",
+    "Both targets remain fenced through eviction and repository/LFS/token/registry verification; sources remain held."
+  ],
+  "limits": [
+    "One namespace and bucket, not an installation-wide snapshot barrier.",
+    "Discovery responses are fixture data; no production namespace completeness claim.",
+    "Recovery uses per-object archive restore in the test; durable namespace mapping and restore/release coordinator remain open.",
+    "Other namespaces/writers, deployment-state capture, configured remote transport and deployed qualification remain open.",
+    "Plaintext private archives; encryption and custody remain operator responsibilities."
+  ]
+}

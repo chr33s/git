@@ -69,6 +69,7 @@ import {
   CopyText,
   ForgetCopied,
   FocusSearch,
+  FocusDialogTrigger,
   LoadUrl,
   Navigate,
   RememberRail,
@@ -104,7 +105,8 @@ const holdsSubmitted = (model: Model, submitted: SubmittedTask): boolean =>
 
 export const update = (model: Model, message: AppMessage): Return =>
   AppMessage.match<Return>(message, {
-    ClickedOpenDialog: ({ name }) => changeDialog(model, name, Dialog.open),
+    ClickedOpenDialog: ({ name }) => ({ model, commands: [FocusDialogTrigger({ name })] }),
+    FocusedDialogTrigger: ({ name }) => changeDialog(model, name, Dialog.open),
     GotDialogMessage: ({ dialogId, message }) => foldDialog(model, dialogId, message),
     GotMenuMessage: ({ menuId, message }) =>
       foldMenu(model, menuId, message, (next, item) =>

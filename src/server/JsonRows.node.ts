@@ -20,12 +20,48 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { Result, Schema } from "effect";
+import { StorageFailure } from "../git/Error.ts";
+import type { Limits } from "./RegistryCapacity.ts";
 
-const Rows = Schema.fromJsonString(Schema.Array(Schema.Unknown));
+/** Call under editRows' lock before parsing a file for an addition. */
+export const checkCapacity = (file: string, limits: Limits): void => {
+  let size: number;
+  try {
+    size = fs.statSync(file).size;
+  } catch (cause) {
+    if (cause instanceof Error && "code" in cause && cause.code === "ENOENT") return;
+    throw cause;
+  }
+  if (size > limits.bytes) throw new StorageFailure({ operation: "quota.registry", path: file });
+};
+
+const syncDirectory = (directory: string): void => {
+  const descriptor = fs.openSync(directory, "r");
+  try {
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+};
+
+/** Existing directories can be remnants of an earlier failed creation. */
+const prepareDirectory = (directory: string): void => {
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  // There is no durable marker proving which ancestor was synced before a
+  // crash. Repeat the physical chain on every mutation, including reopened
+  // processes; mkdir returning undefined is not evidence of persistence.
+  let current = fs.realpathSync(directory);
+  for (;;) {
+    syncDirectory(current);
+    const parent = path.dirname(current);
+    if (parent === current) return;
+    current = parent;
+  }
+};
 
 /** Reserve the file before reading the snapshot an edit will replace. */
 export const editRows = <A>(file: string, edit: () => A): A => {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  prepareDirectory(path.dirname(file));
   const lock = `${file}.lock`;
   const descriptor = fs.openSync(lock, "wx", 0o600);
   try {
@@ -41,17 +77,22 @@ export const editRows = <A>(file: string, edit: () => A): A => {
 /** Rows as they are stored, revived into the shape the caller works in. */
 export const readRows = <Row, Stored>(
   file: string,
+  schema: Schema.Codec<ReadonlyArray<Stored>, string>,
   revive: (stored: Stored) => Row,
 ): ReadonlyArray<Row> => {
-  if (!fs.existsSync(file)) return [];
-  const parsed = Schema.decodeResult(Rows)(fs.readFileSync(file, "utf8"));
-  // A file somebody edited into a shape this does not understand is an empty
-  // list rather than a crash on every request that touches it.
-  if (Result.isFailure(parsed)) return [];
-  // SAFETY: this file is written only by `writeRows`, which serialises `Stored`
-  // rows; a hand-edited file that lies about them surfaces at `revive`, not as
-  // corruption here.
-  return parsed.success.map((row) => revive(row as Stored));
+  let text: string;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch (cause) {
+    if (cause instanceof Error && "code" in cause && cause.code === "ENOENT") return [];
+    throw cause;
+  }
+  const parsed = Schema.decodeResult(schema)(text);
+  // Parse diagnostics may quote a private key or webhook secret. Preserve the
+  // file and name the problem without echoing any of its bytes into a response.
+  if (Result.isFailure(parsed))
+    throw new Error("invalid registry format; preserve the file for recovery");
+  return parsed.success.map(revive);
 };
 
 /** Publish inside `editRows`, so readers see a complete old or new list. */
@@ -59,12 +100,25 @@ export const writeRows = <Row, Stored>(
   file: string,
   rows: ReadonlyArray<Row>,
   store: (row: Row) => Stored,
+  limits?: Limits,
 ): void => {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  if (limits !== undefined && rows.length > limits.rows)
+    throw new StorageFailure({ operation: "quota.registry", path: file });
+  const bytes = Buffer.from(JSON.stringify(rows.map(store), null, 2));
+  if (limits !== undefined && bytes.byteLength > limits.bytes)
+    throw new StorageFailure({ operation: "quota.registry", path: file });
+  prepareDirectory(path.dirname(file));
   const temporary = `${file}.${crypto.randomUUID()}.tmp`;
   try {
-    fs.writeFileSync(temporary, JSON.stringify(rows.map(store), null, 2));
+    // Buffer uses Node's write-and-fsync path rather than its UTF-8 string
+    // fast path, which does not honor flush in the supported Node 26 runtime.
+    fs.writeFileSync(temporary, bytes, {
+      flag: "wx",
+      mode: 0o600,
+      flush: true,
+    });
     fs.renameSync(temporary, file);
+    syncDirectory(path.dirname(file));
   } finally {
     fs.rmSync(temporary, { force: true });
   }

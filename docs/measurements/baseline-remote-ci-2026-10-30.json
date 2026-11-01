@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "inspectedOn": "2026-10-30",
+  "runUrl": "https://github.com/chr33s/git/actions/runs/40821906940",
+  "revision": "54c6199b79d3b121ad7964ac8d0edaeba85b4666",
+  "conclusion": "success",
+  "completedAt": "2026-10-29T05:21:37Z",
+  "jobs": [
+    {
+      "name": "unit",
+      "jobId": 123276065030,
+      "passedFiles": 144,
+      "passedTests": 1879
+    },
+    {
+      "name": "integration",
+      "jobId": 123276065209,
+      "passedFiles": 1,
+      "passedTests": 15
+    },
+    {
+      "name": "compatibility",
+      "jobId": 123276065267,
+      "passedFiles": 60,
+      "passedTests": 426,
+      "authenticatedGitSuite": "src/server/Auth.interop.test.ts",
+      "authenticatedGitPassedTests": 4
+    }
+  ],
+  "logSha256": "0c597b27cfe99e12b6396efe7c2d1d8ef37a8cdbe8c1443694b45da6fe7b5eca",
+  "limitsOfEvidence": "Baseline committed revision only. Does not cover the current dirty worktree, expanded runtime/browser matrix, new release verifiers or current candidate artifacts."
+}

@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-01",
+  "kind": "private-backup-service-and-remote-connection-preflight",
+  "sourceSha256": {
+    "src/worker.ts": "e793a6383b1005aef1f101c738eecd77a7b3aea4230ebbfb0b66f61ec25edf54",
+    "tools/worker-backup-fixture.ts": "b9d14f511a67dbd9573b2976888d797dcf117ed4b00e9f4c24da2590ab6277a7",
+    "tools/cloudflare-backup-connection.ts": "ed09327ffbb6564072076d4a432fe7799cc9fcc66774d7b9f84ebdc2a88e36b1",
+    "src/host/BackupConnection.test.ts": "79d2cd5a03f62be35282cf796d016ccfd301fda444a4bc29557bbb42205433f0",
+    "package.json": "3a4a1a7a1d212c87ecb3d4dc55533dbfecaee85646a57f4bbc65cca0d51e9a32",
+    "package-lock.json": "5ec892c20a774622885a7b8400be409fae7f3b2d14c038c924f570eb8773d1f9"
+  },
+  "tests": {
+    "node24.12.0": {
+      "files": 2,
+      "passed": 6,
+      "skipped": 0,
+      "strictReporter": true,
+      "logSha256": "9dd1b629215b3a7025dc6fe5362b21194c3701a68ee7db590d9942a70c83b245"
+    },
+    "node26.10.0": {
+      "files": 2,
+      "passed": 6,
+      "skipped": 0,
+      "strictReporter": true,
+      "logSha256": "d1e7bf731f0e04f40576edeefe06ce64372f919830a837e286488420e5b1775e"
+    }
+  },
+  "actualWorker": {
+    "node24.12.0": {
+      "passed": true,
+      "stage": "verify-worker-3bad7372-0921-464d-b378-ed5f38a384aa",
+      "moduleBytes": 1122680,
+      "gzipBytes": 328917,
+      "logSha256": "2dd84a8125b4f160e749442a2653db8a583c5fe4f266ed84e7973b32b23fc0e2"
+    },
+    "node26.10.0": {
+      "passed": true,
+      "stage": "verify-worker-13e4f972-495f-4f82-bb02-22eef9aface9",
+      "moduleBytes": 1122680,
+      "gzipBytes": 328916,
+      "logSha256": "f48a3c5abbdfc359abadc281da2e535e9fc0b9af0c71c2daa1849acf234383e6"
+    }
+  },
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "761dd6e48b7ff6149f7f77d296d4905af065837eab24368dffff0f527828e7ca"
+  },
+  "coverage": [
+    "Production Worker backup method validates requests and forwards to the bound repository namespace by object ID.",
+    "Actual local Worker rehearsal routes capture/import/status/retirement/release through a service binding; malformed object ID is rejected.",
+    "An HTTP POST carrying a Release command does not dispatch private RPC or release the held object.",
+    "Connection preflight rejects missing, duplicate, mismatched and cross-environment namespace/bucket metadata, wrong jurisdiction and identical live/archive buckets.",
+    "Missing or empty configured API tokens fail before a remote connection opens.",
+    "Explicit development dependencies use the already installed runtime and provider SDK versions; the scoped connector owns proxy/runtime disposal."
+  ],
+  "limits": [
+    "No remote account connection was opened; remote metadata retrieval, preview upload, RPC and R2 transfer remain unqualified against Cloudflare.",
+    "Opening the connector creates a Cloudflare preview proxy and requires an approved operator account and appropriate permissions.",
+    "Service binding access to backup conveys administrative authority; no HTTP route is added.",
+    "Standalone operator CLI, deployment/writer isolation, production policy and full deployed recovery remain open."
+  ]
+}

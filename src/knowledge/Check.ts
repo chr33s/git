@@ -26,7 +26,12 @@
 import { compareUtf8 } from "../text.ts";
 import { Effect, Predicate } from "effect";
 
-import { type Invalid, type ObjectNotFound, type StorageFailure } from "../git/Error.ts";
+import {
+  type Invalid,
+  type ObjectNotFound,
+  type RequestLimitExceeded,
+  type StorageFailure,
+} from "../git/Error.ts";
 import { isGitlink, isTree } from "../git/Format.ts";
 import { qualify, unqualify } from "../git/Oid.ts";
 import { Repository } from "../git/Repository.ts";
@@ -376,7 +381,11 @@ const checkConcept = Effect.fn("knowledge.Check.checkConcept")(function* (input:
   readonly evaluationTime: Date;
   readonly judge: Judge;
   readonly limits: Required<Limits>;
-}): Effect.fn.Return<Checked, Invalid | ObjectNotFound | StorageFailure, Repository> {
+}): Effect.fn.Return<
+  Checked,
+  Invalid | ObjectNotFound | RequestLimitExceeded | StorageFailure,
+  Repository
+> {
   const repository = yield* Repository;
   const qualified = qualify(input.blob);
   const bytes = yield* repository
@@ -653,7 +662,11 @@ export const stampOf = (input: {
  */
 export const check = Effect.fn("knowledge.Check.check")(function* (
   input: Input,
-): Effect.fn.Return<Report, Invalid | ObjectNotFound | StorageFailure, Repository> {
+): Effect.fn.Return<
+  Report,
+  Invalid | ObjectNotFound | RequestLimitExceeded | StorageFailure,
+  Repository
+> {
   const repository = yield* Repository;
   const bundle = (input.bundle ?? Concept.BUNDLE).replace(/\/+$/u, "");
   const limits: Required<Limits> = {

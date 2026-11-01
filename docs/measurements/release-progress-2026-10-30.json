@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-30",
+  "kind": "release-journal-crash-and-consistency",
+  "sourceSha256": {
+    "tools/cloudflare-namespace-release.ts": "a268d76daa262a7f0402ae505390005002c83a2f6eb5a39edcd47634e99fec27",
+    "tools/cloudflare-restore-journal.ts": "9436dc026bda1e243ad974faabd98fe347e5397c5f477edd796365e2ad4973a6",
+    "src/host/RestoreJournal.process.test.ts": "01864ba1a06d4bad0716598865d86d4b85ac79d1f3be0f5b1be423cba370f5d4",
+    "src/host/BackupCodec.test.ts": "b94f358df07714a6ce357e3f9ead1d6bd56c60255cc1a38afca54e58c3aec45d"
+  },
+  "tests": {
+    "node24.12.0": {
+      "files": 2,
+      "passed": 16,
+      "logSha256": "41858caa2746d5d7bea8656cf0604dc39d642f20c8f320fea86635f06c6cd45f"
+    },
+    "node26.10.0": {
+      "files": 2,
+      "passed": 16,
+      "logSha256": "cf90d4ac8d290feb11f1a30e7e97ebf39f83d70068b630be83108d36113d7715"
+    }
+  },
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "47b7a73b354d1c0559907e6bafbb51f202f3d92ae267e097fbd220cada0adb86"
+  },
+  "coverage": [
+    "Actual SIGKILL before/after release intent, retirement, per-target release and final completion commit.",
+    "Recovery preserves prior receipts, committed verification digest and progress, and rolls back uncommitted transactions.",
+    "Recovered journal passes SQLite integrity_check and accepts a new transaction.",
+    "Native coordinator rejects released/pending, pending/retired and retired/released orderings before RPC.",
+    "Native lost retirement/release acknowledgement recovery remains successful after restoring valid progress."
+  ],
+  "limits": [
+    "Child-process tests execute journal transactions, not the complete coordinator and remote RPC stack.",
+    "Native tests cover lost acknowledgements and eviction separately from journal process death.",
+    "Power loss, production deployment, installation-wide isolation and complete operator recovery remain unqualified."
+  ]
+}

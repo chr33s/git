@@ -7,7 +7,7 @@ archive="${RUNNER_TEMP}/git-${version}.tar.xz"
 source_dir="${RUNNER_TEMP}/git-${version}"
 
 sudo apt-get update
-sudo apt-get install --yes build-essential curl gettext libcurl4-openssl-dev libexpat1-dev xz-utils zlib1g-dev
+sudo apt-get install --yes autoconf build-essential cargo curl gettext libcurl4-openssl-dev libexpat1-dev xz-utils zlib1g-dev
 curl --fail --location --silent --show-error \
   "https://www.kernel.org/pub/software/scm/git/git-${version}.tar.xz" \
   --output "${archive}"

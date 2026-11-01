@@ -16,11 +16,13 @@
  * method whose body outgrows a screen is a candidate for the same move.
  */
 import { Context, Effect, Layer, Option, Result, Schedule, Stream } from "effect";
+import * as TraversalBudget from "./TraversalBudget.ts";
 import {
   type HookRejected,
   Invalid,
   ObjectNotFound,
   type PackCorrupt,
+  type RequestLimitExceeded,
   RefConflict,
   type StorageFailure,
 } from "./Error.ts";
@@ -318,7 +320,7 @@ export class Repository extends Context.Service<
     readonly packOf: (
       wants: ReadonlyArray<Oid>,
       haves: ReadonlyArray<Oid>,
-    ) => Stream.Stream<Uint8Array, ObjectNotFound | StorageFailure>;
+    ) => Stream.Stream<Uint8Array, ObjectNotFound | StorageFailure | RequestLimitExceeded>;
 
     /**
      * The same answer with shallow options honoured, and the boundary lines
@@ -326,7 +328,7 @@ export class Repository extends Context.Service<
      */
     readonly fetch: (
       request: FetchRequest,
-    ) => Effect.Effect<FetchPlan, ObjectNotFound | StorageFailure>;
+    ) => Effect.Effect<FetchPlan, ObjectNotFound | StorageFailure | RequestLimitExceeded>;
 
     /** A pack of exactly these objects, in this order. */
     readonly packOids: (
@@ -427,7 +429,10 @@ export class Repository extends Context.Service<
        * hash chain to hold.
        */
       readonly exclude?: ReadonlySet<Oid>;
-    }) => Effect.Effect<GcReportType, ObjectNotFound | StorageFailure | Invalid>;
+    }) => Effect.Effect<
+      GcReportType,
+      ObjectNotFound | StorageFailure | Invalid | RequestLimitExceeded
+    >;
 
     /**
      * The best common ancestor of two commits — the base a three-way merge
@@ -1300,6 +1305,8 @@ export const layer = Layer.effect(
      */
     const objectsOf = (commits: ReadonlyArray<Oid>, skip: ReadonlySet<Oid>) =>
       Effect.gen(function* () {
+        const budget = yield* TraversalBudget.current;
+        yield* budget.spend(commits.length);
         const seen = new Set<Oid>(skip);
         const order: Oid[] = [];
         const take = (oid: Oid): boolean => {
@@ -1313,11 +1320,14 @@ export const layer = Layer.effect(
           if (!take(oid)) continue;
           const commit = yield* readCommit(oid);
 
+          yield* budget.spend(1);
           const stack: Oid[] = [commit.tree];
           while (stack.length > 0) {
             const treeOid = stack.pop()!;
-            if (treeOid === EMPTY_TREE_OID || !take(treeOid)) continue;
-            for (const entry of yield* readTreeEntries(treeOid)) {
+            if (!take(treeOid)) continue;
+            const entries = yield* readTreeEntries(treeOid);
+            yield* budget.spend(entries.length);
+            for (const entry of entries) {
               // A gitlink names a commit in another repository entirely.
               if (isGitlink(entry.mode)) continue;
               if (isTree(entry.mode)) stack.push(entry.oid);
@@ -1339,6 +1349,7 @@ export const layer = Layer.effect(
      * walk would be the same work twice.
      */
     const fetchPlan = Effect.fn("Repository.fetch")(function* (input: FetchRequest) {
+      const budget = yield* TraversalBudget.current;
       const clientShallow = new Set(input.clientShallow ?? []);
       const serverShallow = yield* refs.shallow;
       const deepening =
@@ -1356,6 +1367,7 @@ export const layer = Layer.effect(
 
       // `deepen-not <ref>`: everything reachable from those refs stays put.
       const blocked = new Set<Oid>();
+      yield* budget.spend(input.notRefs?.length ?? 0);
       for (const name of input.notRefs ?? []) {
         const oid = yield* refs.resolve(name);
         if (oid === null) continue;
@@ -1374,6 +1386,7 @@ export const layer = Layer.effect(
       const tagged: Oid[] = [];
       const wants: Oid[] = [];
       const unwalkable: Oid[] = [];
+      yield* budget.spend(input.wants.length);
       for (const want of input.wants) {
         let current = want;
         let object = yield* objects.read(current);
@@ -1384,6 +1397,7 @@ export const layer = Layer.effect(
           const tag = yield* Effect.fromResult(parseTag(object.data)).pipe(
             Effect.mapError(() => new ObjectNotFound({ oid: current })),
           );
+          yield* budget.spend(1);
           current = tag.object;
           object = yield* objects.read(current);
         }
@@ -1402,8 +1416,10 @@ export const layer = Layer.effect(
         depth: 1,
       }));
 
-      while (queue.length > 0) {
-        const { depth, oid } = queue.shift()!;
+      yield* budget.spend(wants.length);
+      for (let cursor = 0; cursor < queue.length; cursor++) {
+        // The loop condition establishes that this queued item exists.
+        const { depth, oid } = queue[cursor]!;
         if (blocked.has(oid)) continue;
 
         const already = depths.get(oid);
@@ -1417,6 +1433,7 @@ export const layer = Layer.effect(
         const atLimit = input.depth !== undefined && depth >= input.depth;
 
         let cut = serverShallow.has(oid);
+        yield* budget.spend(commit.parents.length);
         for (const parent of commit.parents) {
           if (serverShallow.has(oid) || atLimit || blocked.has(parent)) {
             cut = true;
@@ -1519,6 +1536,10 @@ export const layer = Layer.effect(
             });
           }
           for (const mergeParent of mergeParents) yield* readCommit(mergeParent);
+          // Reads may treat the empty tree as virtual, but an acknowledged
+          // on-disk commit must remain valid to stock Git. Finish the tree's
+          // durable write before writing the commit or publishing its ref.
+          if (tree === EMPTY_TREE_OID) yield* storeTree([]);
           const oid = yield* objects.write({
             type: "commit",
             data: encodeCommit({

@@ -31,7 +31,7 @@ export const init = (): Model => ({
   dialogs: {
     newTask: Dialog.init({ id: "gp-new-task-dialog", focusSelector: "#gp-new-title" }),
     newBranch: Dialog.init({ id: "gp-new-branch-dialog", focusSelector: "#gp-new-branch-name" }),
-    clone: Dialog.init({ id: "gp-clone-dialog" }),
+    clone: Dialog.init({ id: "gp-clone-dialog", focusSelector: ".gp-clone-url" }),
     propose: Dialog.init({ id: "gp-propose-dialog", focusSelector: "#gp-propose-title" }),
   },
   menus: {

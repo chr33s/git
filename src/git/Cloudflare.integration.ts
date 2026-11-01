@@ -100,7 +100,60 @@ describe("Cloudflare storage conformance", () => {
         [],
         "the contract must hold on DO SQLite and R2, not just in memory",
       );
+      assert.equal(
+        report.results.filter((result) => result.name.startsWith("LFS retained quota:")).length,
+        7,
+      );
+      assert.equal(
+        report.results.filter((result) => result.name.startsWith("R2 Git mutation settlement:"))
+          .length,
+        4,
+      );
       assert.ok(report.passed >= 15, `expected the full suite, ran ${report.passed}`);
+      assert.equal(
+        report.results.filter((result) => result.name.startsWith("SQL registry quota:")).length,
+        10,
+      );
+      assert.equal(
+        report.results.filter((result) => result.name.startsWith("Git HEAD quota:")).length,
+        4,
+      );
+      assert.equal(
+        report.results.filter((result) => result.name.startsWith("Git metadata quota:")).length,
+        6,
+      );
+      assert.equal(
+        report.results.filter((result) => result.name.startsWith("SQLite metadata corruption:"))
+          .length,
+        8,
+      );
+      assert.equal(
+        report.results.filter((result) => result.name.startsWith("SQLite ref failure rollback:"))
+          .length,
+        3,
+      );
+
+      assert.equal(
+        report.results.filter((result) => result.name.startsWith("Git retained quota:")).length,
+        10,
+      );
+      assert.equal(
+        report.results.filter((result) => result.name.startsWith("request upload inactivity >"))
+          .length,
+        1,
+        "native upload idle cancellation must run inside workerd",
+      );
+      assert.equal(
+        report.results.filter((result) => result.name.startsWith("LFS multipart cleanup after"))
+          .length,
+        3,
+      );
+      assert.equal(
+        report.results.filter((result) => result.name.startsWith("response delivery deadlines >"))
+          .length,
+        3,
+        "native source, reader, and absolute response deadlines must run inside workerd",
+      );
     }),
   );
 });
@@ -114,12 +167,32 @@ describe("Artifacts registry conformance", () => {
       assert.equal(response.status, 200);
 
       const report = await json<ConformanceReport>(response);
+      assert.equal(
+        report.results.filter((result) => result.name.startsWith("SQLite capacity:")).length,
+        4,
+      );
       assert.deepEqual(
         report.results.filter((result) => !result.ok).map((f) => `${f.name}: ${f.error ?? ""}`),
         [],
         "the contract must hold on DO SQLite, not just in memory",
       );
       assert.ok(report.passed >= 10, `expected the full suite, ran ${report.passed}`);
+      assert.equal(
+        report.results.filter((result) =>
+          result.name.startsWith("SQLite registry deletion failure:"),
+        ).length,
+        3,
+      );
+      assert.equal(
+        report.results.filter((result) => result.name.startsWith("SQLite token corruption:"))
+          .length,
+        4,
+      );
+      assert.equal(
+        report.results.filter((result) => result.name.startsWith("SQLite repository corruption:"))
+          .length,
+        6,
+      );
     }),
   );
 });

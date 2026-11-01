@@ -8,6 +8,11 @@
 
 /hub/*
   Cache-Control: public, max-age=31536000, immutable
+  Content-Security-Policy: default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https: http:; worker-src 'self' blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; frame-ancestors 'none'; form-action 'none'
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: no-referrer
+  Permissions-Policy: camera=(), microphone=(), geolocation=()
 
 # The entry page is reached as `/hub/` — the asset layer's own spelling of it,
 # and what the Worker asks for on every deep link — as well as by file name.
@@ -28,5 +33,9 @@
   Cache-Control: public, max-age=0, must-revalidate
 
 /hub/main.css
+  ! Cache-Control
+  Cache-Control: public, max-age=0, must-revalidate
+
+/hub/bootstrap.js
   ! Cache-Control
   Cache-Control: public, max-age=0, must-revalidate

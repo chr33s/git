@@ -12,19 +12,30 @@ import { FLUSH, pkt } from "../git/Pkt.ts";
 import * as Repository from "../git/Repository.ts";
 import { fastImport, gitEnv, gitIn, hasGit, importCommit } from "../testing/Git.ts";
 import { push } from "./Push.ts";
+import { Transport } from "./Transport.ts";
+import * as Egress from "../host/Egress.node.ts";
 
 describe.skipIf(!hasGit)("streamed pushes to stock Git", () => {
-  it.live(
-    "starts before pack completion, replays after an early challenge, and keeps the initial redirect",
-    () =>
+  it.live.each([false, true])(
+    "starts before pack completion, replays after an early challenge, and keeps the initial redirect (egress=%s)",
+    (restricted) =>
       Effect.promise(async () => {
         const root = await fs.mkdtemp(path.join(os.tmpdir(), "push-streaming-"));
         const remote = path.join(root, "remote.git");
         const gate = Promise.withResolvers<void>();
         let posts = 0;
         let aliases = 0;
+        let redirectUploads = false;
+        let redirectedUploads = 0;
+        let egress: ReturnType<typeof Egress.make> | undefined;
         const server = http.createServer(async (request, response) => {
           try {
+            if (request.url === "/unexpected") {
+              redirectedUploads++;
+              request.resume();
+              response.end();
+              return;
+            }
             if (request.url?.startsWith("/alias")) {
               aliases++;
               response.writeHead(308, { location: request.url.replace("/alias", "/canonical") });
@@ -44,6 +55,12 @@ describe.skipIf(!hasGit)("streamed pushes to stock Git", () => {
               return;
             }
             posts++;
+            if (redirectUploads) {
+              request.resume();
+              response.writeHead(307, { location: "/unexpected" });
+              response.end();
+              return;
+            }
             if (posts === 1) {
               request.resume();
               response.writeHead(401, { "www-authenticate": 'Hub-SSH-v1 nonce="fixture"' });
@@ -80,6 +97,10 @@ describe.skipIf(!hasGit)("streamed pushes to stock Git", () => {
           const address = server.address();
           assert.ok(address !== null && !Predicate.isString(address));
           const url = `http://127.0.0.1:${address.port}/alias`;
+          egress = Egress.make(Egress.origins([new URL(url).origin]));
+          const network = restricted
+            ? Layer.succeed(Transport)({ fetch: egress.fetch })
+            : Layer.empty;
           const repository = await Effect.runPromise(
             Repository.Repository.pipe(
               Effect.provide(
@@ -107,6 +128,7 @@ describe.skipIf(!hasGit)("streamed pushes to stock Git", () => {
               },
             }).pipe(
               Effect.provideService(Repository.Repository, gated),
+              Effect.provide(network),
               Effect.timeout("10 seconds"),
             ),
           );
@@ -121,8 +143,25 @@ describe.skipIf(!hasGit)("streamed pushes to stock Git", () => {
           });
           assert.equal(aliases, 2);
           assert.equal(gitIn(remote)("show", "stock:a"), "accepted by stock Git");
+
+          redirectUploads = true;
+          await assert.rejects(
+            Effect.runPromise(
+              push({
+                url,
+                refs: [{ local: "refs/heads/main", remote: "refs/heads/redirected" }],
+              }).pipe(
+                Effect.provideService(Repository.Repository, repository),
+                Effect.provide(network),
+              ),
+            ),
+            { _tag: "Invalid", field: "remote" },
+          );
+          assert.equal(redirectedUploads, 0, "an upload must not follow a second redirect");
+          assert.equal(gitIn(remote)("for-each-ref", "refs/heads/redirected"), "");
         } finally {
           gate.resolve();
+          await egress?.close();
           server.closeAllConnections();
           await new Promise<void>((resolve) => server.close(() => resolve()));
           await fs.rm(root, { recursive: true, force: true });

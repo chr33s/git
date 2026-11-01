@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-30",
+  "kind": "restore-journal-process-death",
+  "sourceSha256": {
+    "tools/cloudflare-restore-journal.ts": "e0ebd52030c9d9dbaf9c87db97fdb0cd6c6517e3a6407f269fee48e592b2a712",
+    "tools/cloudflare-namespace-restore.ts": "e34ff3e1c867556ab98feb075b86e185756b1d2d6ea5ec8014f73ee538f12745",
+    "src/host/RestoreJournal.process.test.ts": "ba9fb7859dc8cb017800743ee7bc091eb1c3ba2db1f99c62910f73d1d4b70770",
+    "src/host/BackupCodec.test.ts": "8d5f55796fe3205f5fd8e56cceb51645b6a769e983cd8b180f504add2df57368"
+  },
+  "tests": {
+    "node24.12.0": {
+      "files": 2,
+      "passed": 8,
+      "logSha256": "49d59dc1cdc4279db8446de4d25dc784ba6768b8908335d3de68a92726ca9596"
+    },
+    "node26.10.0": {
+      "files": 2,
+      "passed": 8,
+      "logSha256": "cf949484a5943c464675c65539d81302977919a2671b03a4537c7865180d69e7"
+    }
+  },
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "ba6e7f2a8e69d00e58a754b73620a7a5a2f360a34dd8efa1b666a04902d02490"
+  },
+  "coverage": [
+    "Actual SIGKILL before and after mapping transaction commit.",
+    "Actual SIGKILL before and after receipt transaction commit and after readiness commit.",
+    "Reopening through production journal acquisition releases dead-process locks, recovers committed state and rolls back pending writes.",
+    "Recovered SQLite integrity_check is ok and subsequent writes succeed.",
+    "Private directory/file modes persist; permissive modes and symlinked paths are rejected.",
+    "Native two-object namespace restore regression passes after journal extraction."
+  ],
+  "limits": [
+    "Crash tests execute journal transaction boundaries in a child process, not the full remote coordinator.",
+    "No power-loss, network-filesystem or production Cloudflare durability qualification.",
+    "Global isolation, durable release coordination and deployed recovery remain open."
+  ]
+}

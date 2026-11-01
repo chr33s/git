@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-01",
+  "kind": "durable-explicit-failed-capture-abandonment",
+  "sourceSha256": {
+    "src/host/CloudflareBackupFence.ts": "2ece6d3b381ac4428dd938fa0e799d58456e8c1ac2c43c04ae6e6293b6f8d0f5",
+    "src/host/CloudflareBackupAdmin.ts": "a83ad7b727e2e2c1aaf924348760c0eeee8274172cd95adcf460ab446d619827",
+    "tools/cloudflare-source-release.ts": "ee34cb292d3a918c8c0d2e70bda20d0f3b1d34a6dc4b9bcc6ba0e7360f10eb75",
+    "tools/backup-cloudflare.ts": "49bd1e4d89341a86a29f7546264b7c5c346073f393636d9c9354bab790cd9ad0",
+    "tools/worker-backup-fixture.ts": "b32cde580e77ca28db7e444662979404924eb2b1f8952e96da6f067980597079",
+    "src/host/BackupAbandon.test.ts": "651335ea07d7ab07a4aab5a3d37af3403bee7cb02bb6110aa7cf46a0b1ce0892",
+    "src/host/BackupCommand.test.ts": "3bb0d9422673926a8c5ad4604dfaf0aab17eabd41c49785a8f9deabc1c237209",
+    "src/host/BackupCodec.test.ts": "16b74befec14ad96383d7c1bcc5c8668f4e6c4a011e278931cb7fa65d0f4d659",
+    "src/host/SourceRelease.process.test.ts": "ae9a6ff9e2782678be9a339fde04b956e641d6282ca855e2e5f3e29c94f177a4",
+    "src/testing/BackupProcess.ts": "b827a6d9d08beb827776ca9e47aea03ac2d0c83509be55b6fb1a6c3ae9cd9b34"
+  },
+  "tests": {
+    "node26.10.0": {
+      "files": 3,
+      "passed": 9,
+      "skipped": 0,
+      "strictReporter": true,
+      "logSha256": "2615e56032328cb79c096f2a8bbb482b0f142e3c558f1dd0ac5a4b06e5179b5b"
+    },
+    "node24.12.0": {
+      "files": 4,
+      "passed": 11,
+      "skipped": 0,
+      "strictReporter": true,
+      "logSha256": "fb61a2c2b324830ee560303df4bffbe3cdc9405cfbb79aa761378f40c104bce6"
+    }
+  },
+  "actualWorker": {
+    "node26.10.0": {
+      "passed": true,
+      "moduleBytes": 1122929,
+      "gzipBytes": 328990,
+      "bundleReportSha256": "377aa2ff827f034761387ad8183a7db30486b50f97747c45f51749bd9299eda7",
+      "logSha256": "ac84f7685a96b56ecbcd266106e08780dfa42d863de48b38e7e5921ae15e6525"
+    },
+    "node24.12.0": {
+      "passed": true,
+      "moduleBytes": 1122929,
+      "gzipBytes": 328992,
+      "bundleReportSha256": "ca9b16f4e012e80b02c46a882cbd63384acdb9150bd48615384baf1092103e04",
+      "logSha256": "cc3a486faaabd728f5de0397493b07aa27d95fb749e82282c0383414ea7309cc"
+    }
+  },
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "bc3087d7bae22e7f189016a45ec4fd1bdfd217642e2d91d75948c7d74445ef3c"
+  },
+  "verified": [
+    "Explicit abandon-sources plan authenticates signed pre-hold intent and hashes private decision file into separate durable source journal",
+    "Held, draining and untouched source objects can resume without re-holding or deleting partial data",
+    "Draining waits for admitted requests and followups before syncing and reopening",
+    "Wrong snapshot, restore checkpoints and sync failure cannot reopen admission",
+    "Lost successful acknowledgement resumes after eviction; SIGKILL before/after remote operation and after journal progress resumes",
+    "Changed decision or opposite release/abandon operation cannot reuse journal before any remote requests",
+    "Terminal retry does not acquire a connection or clear newer holds",
+    "Private service-binding transport supports abandonment and rejects active import checkpoints and stale snapshot identity"
+  ],
+  "limitations": [
+    "Local native Worker and subprocess qualification only; configured remote account remains pending",
+    "No forced cancellation of active application work; operators must resolve work and stop the original capture",
+    "Older partial captures without signed intent cannot use this operation",
+    "Abandonment does not certify backup completeness or read back R2; all partial files and objects are retained",
+    "Production isolation, retention, custody and recovery objectives remain open"
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-30",
+  "kind": "native-hub-namespace-recovery",
+  "git": "git version 2.56.0",
+  "sourceSha256": {
+    "src/testing/BackupHub.worker.ts": "5c5e7253dec2b8e23284d10ef298e8057bf589d1018425f028f6b055aefb51e6",
+    "src/testing/BackupApplication.worker.ts": "453006e9a6bb3932c9b4570c588ec9fa771079736a31d73cccf2f2a707aa1061",
+    "src/testing/BackupCodec.worker.ts": "60d97deff711d9653deca2d24157bbf21956c66f0e7f7c45c193f886cf06435d",
+    "src/host/BackupRecovery.interop.test.ts": "2e66e7409fe2dc43ba755db44cb5c08ac768d0da83757ab2f7b0a6421307d842"
+  },
+  "tests": {
+    "node24.12.0": {
+      "files": 2,
+      "passed": 3,
+      "skipped": 0,
+      "strictReporter": true,
+      "logSha256": "d70a904883308f76a0b233269c93443fbbce461d11ac715f04d61779f2114082"
+    },
+    "node26.10.0": {
+      "files": 2,
+      "passed": 3,
+      "skipped": 0,
+      "strictReporter": true,
+      "logSha256": "e738597d2a8d295440a1741797a081f2cf6d9736ac777f8d606d40cf775a9374"
+    }
+  },
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "9d88f17d79146bc0c3c6753419685630a423d400a9e618def17e11b939ced6c4"
+  },
+  "coverage": [
+    "Seed signed genesis, member grant, pull request, comment, session opening and production using production hub/trust APIs on native Cloudflare stores.",
+    "Namespace capture/restore preserves all Git object bytes and refs alongside SQL/KV/R2 and authorization metadata.",
+    "After target eviction, production trust and hub projections match source; PR and trust projections have no rejected events.",
+    "Session prompt, production links, note and usage survive in the projected state.",
+    "Stock Git verifies all restored objects and explicitly fetches refs/meta/* and refs/hub/* into a fresh clone.",
+    "Verification precedes target release; the verification-report digest records hub projection success."
+  ],
+  "limits": [
+    "Local native fixture only; no deployed Cloudflare HTTP recovery or installation-wide isolation proof.",
+    "Basic signed hub histories are covered, not every redaction, revocation or concurrent history scenario.",
+    "Complete supported-installation recovery, operator policy and production recovery targets remain open."
+  ]
+}

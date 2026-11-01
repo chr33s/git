@@ -1957,10 +1957,13 @@ describe("a copy the clipboard refused", () => {
 
 describe("Foldkit UI controls", () => {
   it("opens and closes dialogs through their child state", () => {
-    const opened = update(
+    const requested = update(
       openOn(AppRoute.Code({ path: "" })),
       AppMessage.ClickedOpenDialog({ name: "clone" }),
     );
+    assert.equal(requested.model.controls.dialogs.clone.isOpen, false);
+    assert.ok(requested.commands?.some((command) => command.name === "FocusDialogTrigger"));
+    const opened = update(requested.model, AppMessage.FocusedDialogTrigger({ name: "clone" }));
     assert.equal(opened.model.controls.dialogs.clone.isOpen, true);
     assert.ok(opened.commands?.some((command) => command.name === "ShowDialog"));
     const closed = update(

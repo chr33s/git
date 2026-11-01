@@ -42,6 +42,7 @@ export type SubmittedTask = typeof SubmittedTask.Type;
 
 export const AppMessage = Message.defineMessageUnion({
   ClickedOpenDialog: { name: DialogName },
+  FocusedDialogTrigger: { name: DialogName },
   GotDialogMessage: { dialogId: DialogName, message: Dialog.Message },
   GotMenuMessage: { menuId: MenuName, message: Menu.Message },
   GotDetailTabsMessage: { message: Tabs.Message },

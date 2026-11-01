@@ -14,13 +14,23 @@
  *
  *   npm run build:ui && node src/ui/verify.ts
  *   node src/ui/verify.ts --shots <dir>    # also write screenshots
+ *   node src/ui/verify.ts --browser firefox # pinned Playwright engine
  *
- * Playwright is already a devDependency, and Chromium is expected on PATH or at
- * PLAYWRIGHT_BROWSERS_PATH; pass --executable to point at a specific binary.
+ * Playwright is already a devDependency. Install the selected engine with
+ * `playwright install`; --executable overrides its binary path. Chromium is the default.
  */
-import { chromium, type Browser, type Page } from "playwright";
+import {
+  chromium,
+  firefox,
+  webkit,
+  type Browser,
+  type BrowserContext,
+  type Page,
+} from "playwright";
+
+type BrowserPages = Pick<Browser, "newPage" | "close">;
 import { Effect, Layer, Schema } from "effect";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import { createServer, type Server } from "node:http";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
@@ -50,13 +60,40 @@ const flag = (name: string): string | undefined => {
 };
 
 const shots = flag("--shots");
-const executable = flag("--executable") ?? process.env["CHROMIUM_PATH"];
+const engine = Schema.decodeUnknownSync(Schema.Literals(["chromium", "firefox", "webkit"]))(
+  flag("--browser") ?? "chromium",
+);
+const executable =
+  flag("--executable") ?? (engine === "chromium" ? process.env["CHROMIUM_PATH"] : undefined);
+const browserType = { chromium, firefox, webkit }[engine];
+
+const boundAddress = Schema.decodeUnknownSync(Schema.Struct({ port: Schema.Int }));
+const portOf = (server: Server): number => boundAddress(server.address()).port;
+const originOf = (server: Server): string => `http://localhost:${portOf(server)}`;
+const availablePort = async (): Promise<number> => {
+  const reservation = createServer();
+  await new Promise<void>((resolve) => reservation.listen(0, "127.0.0.1", resolve));
+  const port = portOf(reservation);
+  await new Promise<void>((resolve, reject) =>
+    reservation.close((error) => (error ? reject(error) : resolve())),
+  );
+  return port;
+};
 
 const failures: string[] = [];
 
 const check = (name: string, ok: boolean, detail = ""): void => {
   console.info(`${ok ? "  ok  " : "FAIL  "}${name}${detail === "" ? "" : `  — ${detail}`}`);
   if (!ok) failures.push(name);
+};
+
+/** CSP violations are console errors, not uncaught JavaScript exceptions. */
+const watchPolicy = (page: Page): void => {
+  page.on("console", (message) => {
+    if (message.type() === "error" && /Content Security Policy/i.test(message.text())) {
+      check("the production content policy permits this UI operation", false);
+    }
+  });
 };
 
 /** `@pierre/diffs` makes the rendered blob a `role=textbox` once attached. */
@@ -798,7 +835,7 @@ const oneOrigin = async (input: {
   readonly ready: string;
   readonly entry: string;
   readonly port: number;
-  readonly browser: Browser;
+  readonly browser: BrowserPages;
 }): Promise<void> => {
   console.info(`\n${input.label}`);
   const root = await mkdtemp(join(tmpdir(), "git-plus-one-origin-"));
@@ -808,10 +845,13 @@ const oneOrigin = async (input: {
 
   const child = spawn(process.execPath, [...input.argv(root, input.port)], {
     cwd: join(here, "..", ".."),
-    env: { ...process.env, GIT_ROOT: root, PORT: String(input.port) },
+    // Docker sets HOSTNAME to the container name. Both child entry points
+    // must bind the same loopback interface this verifier connects to.
+    env: { ...process.env, HOSTNAME: "127.0.0.1", GIT_ROOT: root, PORT: String(input.port) },
     stdio: ["ignore", "pipe", "pipe"],
   });
   const page = await input.browser.newPage();
+  watchPolicy(page);
   const thrown: string[] = [];
   page.on("pageerror", (error) => thrown.push(error.message));
   let output = "";
@@ -839,6 +879,14 @@ const oneOrigin = async (input: {
     });
 
     const origin = `http://127.0.0.1:${String(input.port)}`;
+    let hmrConnected = false;
+    page.on("websocket", (socket) => {
+      const target = new URL(socket.url());
+      if (target.protocol !== "ws:" || target.host !== new URL(origin).host) return;
+      socket.on("framereceived", (frame) => {
+        if (frame.payload.toString().includes('"type":"connected"')) hmrConnected = true;
+      });
+    });
     const index = await fetch(`${origin}/`);
     check(
       `${input.label} answers the page itself`,
@@ -880,9 +928,11 @@ const oneOrigin = async (input: {
       (await page.locator(".gp-sidebar").count()) === 1 &&
         (await page.locator(".gp-task-row").count()) > 0,
     );
+    if (input.label === "dev:ui")
+      check("development HMR connects on the same origin", hmrConnected);
     check("with no uncaught errors", thrown.length === 0, thrown.join("; "));
   } finally {
-    await page.close();
+    await page.context().close();
     if (child.exitCode === null) {
       child.kill();
       await once(child, "exit");
@@ -908,9 +958,10 @@ const shot = async (page: Page, name: string): Promise<void> => {
 };
 
 /** Every screen mounts, in both palettes, with nothing thrown. */
-const render = async (browser: Browser, origin: string): Promise<void> => {
+const render = async (browser: BrowserPages, origin: string): Promise<void> => {
   console.info("\nrender");
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  watchPolicy(page);
   const thrown: string[] = [];
   page.on("pageerror", (error) => thrown.push(error.message));
 
@@ -973,13 +1024,14 @@ const render = async (browser: Browser, origin: string): Promise<void> => {
     dead.includes("the git+ API is not running"),
     dead,
   );
-  await page.close();
+  await page.context().close();
 };
 
 /** The behaviours the design conversation settled on. */
-const interact = async (browser: Browser, origin: string): Promise<void> => {
+const interact = async (browser: BrowserPages, origin: string): Promise<void> => {
   console.info("\ninteract");
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  watchPolicy(page);
   page.on("pageerror", (error) => failures.push(`pageerror: ${error.message}`));
   const route = (): Promise<string> => page.evaluate(() => globalThis.location.pathname);
   const railWidth = (): Promise<number> =>
@@ -1413,13 +1465,14 @@ const interact = async (browser: Browser, origin: string): Promise<void> => {
     await route(),
   );
 
-  await page.close();
+  await page.context().close();
 };
 
 /** Code and Diff read the API rather than the fixtures. */
-const live = async (browser: Browser, origin: string): Promise<void> => {
+const live = async (browser: BrowserPages, origin: string): Promise<void> => {
   console.info("\nlive");
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  watchPolicy(page);
   page.on("pageerror", (error) => failures.push(`pageerror: ${error.message}`));
   const route = (): Promise<string> => page.evaluate(() => globalThis.location.pathname);
 
@@ -1585,13 +1638,15 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
     "Clone has an accessible dialog name",
     (await page.getByRole("dialog", { name: "Clone", exact: true }).count()) === 1,
   );
-  await page.keyboard.press("Tab");
-  check(
-    "dialog focus stays inside the open modal",
-    await page
-      .locator(".gp-clone dialog")
-      .evaluate((dialog) => dialog.contains(document.activeElement)),
-  );
+  for (const key of ["Tab", "Tab", "Shift+Tab", "Shift+Tab"]) {
+    await page.keyboard.press(key);
+    check(
+      `dialog focus stays inside the open modal after ${key}`,
+      await page
+        .locator(".gp-clone dialog")
+        .evaluate((dialog) => dialog.contains(document.activeElement)),
+    );
+  }
   await page.keyboard.press("Escape");
   await page.waitForTimeout(300);
   check(
@@ -1951,7 +2006,7 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
     (await page.textContent(".gp-detail-eyebrow .gp-status"))?.trim() === "Merged" &&
       (await page.locator(".gp-review .gp-notice").count()) === 0,
   );
-  await page.close();
+  await page.context().close();
 };
 
 /**
@@ -1962,7 +2017,7 @@ const live = async (browser: Browser, origin: string): Promise<void> => {
  * deployed shape (the Worker serves both) and the one a browser's CORS rules
  * allow.
  */
-const localMode = async (browser: Browser): Promise<void> => {
+const localMode = async (browser: BrowserPages): Promise<void> => {
   console.info("\nlocal");
 
   const root = await mkdtemp(join(tmpdir(), "gp-local-"));
@@ -2057,10 +2112,11 @@ const localMode = async (browser: Browser): Promise<void> => {
       response.end("proxy failure");
     });
   });
-  await new Promise<void>((resolve) => front.listen(8134, resolve));
-  const origin = "http://localhost:8134";
+  await new Promise<void>((resolve) => front.listen(0, resolve));
+  const origin = originOf(front);
 
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  watchPolicy(page);
 
   try {
     await page.goto(`${origin}/hub/code`, { waitUntil: "networkidle" });
@@ -2069,7 +2125,18 @@ const localMode = async (browser: Browser): Promise<void> => {
     // sync controls exist only once the screen holds the local client.
     await page.waitForSelector(".gp-sync", { timeout: 30_000 });
     check("the OPFS clone takes over the Code screen", true);
-    await page.waitForTimeout(500);
+    await page
+      .locator(".gp-commit-subject")
+      .filter({ hasText: "first from origin" })
+      .waitFor({ timeout: 30_000 })
+      .catch(async (error) => {
+        console.error(
+          "Unexpected local fixture commit:",
+          await page.locator(".gp-commit-subject").allTextContents(),
+        );
+        console.error("Local fixture notices:", await page.locator(".gp-notice").allTextContents());
+        throw error;
+      });
     check(
       "the commit bar shows the origin's commit, read locally",
       ((await page.textContent(".gp-commit-subject")) ?? "").includes("first from origin"),
@@ -2229,7 +2296,7 @@ const localMode = async (browser: Browser): Promise<void> => {
     await page.waitForTimeout(400);
     await page.fill("#gp-new-branch-name", "topic");
     await page.click(".gp-new-branch button[type='submit']");
-    await page.waitForTimeout(1500);
+    await page.locator(".gp-new-branch dialog").waitFor({ state: "hidden", timeout: 30_000 });
     await page.click('.gp-file-card button[aria-label="Edit file"]');
     await editorBox(page).waitFor({ state: "visible" });
     await fillEditor(page, "# core\n\nProposed from the browser.\n");
@@ -2347,9 +2414,11 @@ const localMode = async (browser: Browser): Promise<void> => {
     );
     check("the published policy is what a push now meets", policy.rules.requiredApprovals === 1);
 
+    execFileSync("git", ["--git-dir", join(root, "core"), "fsck", "--strict"], { stdio: "pipe" });
+    check("stock Git accepts the browser-written repository and hub history", true);
     await shot(page, "local-mode");
   } finally {
-    await page.close();
+    await page.context().close();
     front.close();
     await host.close();
     await rm(root, { recursive: true, force: true });
@@ -2362,7 +2431,7 @@ const localMode = async (browser: Browser): Promise<void> => {
 // entry page, the two entry bundles it references, and the cache rules the
 // asset layer applies. A missing one of these is a deploy that would publish
 // the API with no UI behind it.
-for (const artifact of ["index.html", "main.js", "main.css", "_headers"]) {
+for (const artifact of ["index.html", "bootstrap.js", "main.js", "main.css", "_headers"]) {
   const present = await stat(join(dist, artifact)).then(
     () => true,
     () => false,
@@ -2380,17 +2449,40 @@ check(
   ),
 );
 
-const offline = await serve(false, 8131);
-const online = await serve(true, 8132);
-const browser = await chromium.launch(
-  executable === undefined ? {} : { executablePath: executable },
-);
+const offline = await serve(false, 0);
+const online = await serve(true, 0);
+// Each scenario gets an ordinary isolated profile. Off-the-record WebKit
+// contexts can deny OPFS independently of the application's storage behavior.
+const profiles = new Set<string>();
+const contexts = new Set<BrowserContext>();
+const browser: BrowserPages = {
+  newPage: async (options) => {
+    const profile = await mkdtemp(join(tmpdir(), `git-ui-${engine}-`));
+    profiles.add(profile);
+    const context = await browserType.launchPersistentContext(
+      profile,
+      executable === undefined ? options : { ...options, executablePath: executable },
+    );
+    contexts.add(context);
+    return context.newPage();
+  },
+  close: async () => {
+    try {
+      await Promise.all([...contexts].map((context) => context.close()));
+    } finally {
+      await Promise.all(
+        [...profiles].map((profile) => rm(profile, { recursive: true, force: true })),
+      );
+    }
+  },
+};
+console.info(`Browser qualification: ${engine}, isolated on-disk profiles`);
 
 try {
   if (process.env["GP_VERIFY_ONLY_LOCAL"] !== "1") {
-    await render(browser, "http://localhost:8131");
-    await interact(browser, "http://localhost:8131");
-    await live(browser, "http://localhost:8132");
+    await render(browser, originOf(offline));
+    await interact(browser, originOf(offline));
+    await live(browser, originOf(online));
   }
   await localMode(browser);
   // Both entry points, held to the same property; see `oneOrigin`.
@@ -2399,7 +2491,7 @@ try {
     argv: () => [join(here, "dev.ts")],
     ready: "ui:   http",
     entry: "main.ts",
-    port: 8133,
+    port: await availablePort(),
     browser,
   });
   await oneOrigin({
@@ -2415,7 +2507,7 @@ try {
     ],
     ready: "browser UI on",
     entry: "main.js",
-    port: 8134,
+    port: await availablePort(),
     browser,
   });
 } finally {

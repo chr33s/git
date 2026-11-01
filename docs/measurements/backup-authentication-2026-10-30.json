@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-30",
+  "kind": "backup-frame-authentication",
+  "sourceSha256": {
+    "tools/cloudflare-backup-auth.ts": "635276f419ee905f61f79002ed5dd841adbde9a8b1f8b2a1ccfedd211c30c76c",
+    "src/host/BackupAuthentication.test.ts": "369a5391858d8bba4235d34620c4dec1d9e5dfaef385fd05286e30e87cba4b9e",
+    "src/crypto/SshSignature.ts": "8ae9156456a291ac0651498ae1d2a576c1d49b7665a8d94551e0077aa0e86c85"
+  },
+  "verification": {
+    "node24.12.0": {
+      "passed": 3,
+      "logSha256": "88237a186a51bc4b9f24bbfe3a0101a6210fa13b5f45f391f2a49a0a3d9e1083"
+    },
+    "node26.10.0": {
+      "passed": 3,
+      "logSha256": "c1b90285bc96b8d0176bec74f99b9e4ce90bd952c605c3d947a9af6c8eaec8bc"
+    },
+    "existingSshInterop": {
+      "passed": 5,
+      "logSha256": "faa3894f92fce5fe677b116e20703c7be3d5b02251b577144c7f401768ca9c5c"
+    },
+    "backupNamespaceOpenSsh": {
+      "command": "ssh-keygen -Y verify -I backup -n chr33s-git/backup/v1 -f <temporary-allowed-signers> -s <frame-signature>",
+      "result": "passed",
+      "logSha256": "6aff74e22555894ebf81aca69ae0c4d27b7fb6f9f86ad74c0ab76021fc9ae817"
+    },
+    "repositoryCheck": "passed"
+  },
+  "limits": [
+    "Page authentication only; final inventory/completeness verification still required.",
+    "Expected coordinates and trusted signer fingerprint must be independently supplied.",
+    "No encryption, key-management service, production endpoint or authenticated coordinator added."
+  ]
+}

@@ -63,7 +63,7 @@ export const noChainedTypeAssertionsRule = defineRule({
         "This assertion chain discards type evidence. Keep the original precise type, or parse untrusted input at its boundary before narrowing it.",
     },
   },
-  create(context) {
+  createOnce(context) {
     const checkTypeAssertion = (node: TypeAssertionExpression) => {
       if (!isOutermostAssertionInChain(node) || !isForbiddenAssertionChain(node)) return;
       context.report({ node, messageId: "chained" });

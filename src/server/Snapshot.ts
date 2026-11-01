@@ -7,8 +7,10 @@
  * linearizable. That is the right door for writes and the wrong bottleneck
  * for reads: a clone needs the refs (here) and the objects (already in R2),
  * and nothing about serving either requires waking the writer. So the host
- * publishes this snapshot to R2 *synchronously on every mutating request,
- * before acknowledging it* — write-ahead-log discipline — and the front
+ * invalidates this snapshot before every mutating request and republishes it
+ * synchronously before acknowledging the request. If invalidation fails, the
+ * mutation is refused; if publication fails, reads fall back to the writer.
+ * The front
  * Worker serves anonymous `git-upload-pack` traffic (the advertisement and
  * the pack) statelessly from R2 alone, falling back to the Durable Object
  * whenever the snapshot is absent, unreadable, restricted, or the request is
@@ -29,6 +31,7 @@
  * window exists for any CDN-cached pack anywhere; a client that hits it
  * retries against a server that has already converged.
  */
+import * as Telemetry from "./SnapshotTelemetry.ts";
 import { DateTime, Effect, Layer, Result, Schema } from "effect";
 
 import type { GitError, Invalid } from "../git/Error.ts";
@@ -41,6 +44,30 @@ import { anonymousReadAllowed } from "./Auth.ts";
 import * as Protocol from "./Protocol.ts";
 
 const encoder = new TextEncoder();
+
+/** Load a derived view; storage faults are observable but authority stays in the writer. */
+export const load = Effect.fn("Snapshot.load")(function* <E>(
+  read: Effect.Effect<Uint8Array | null, E>,
+) {
+  const bytes = yield* read.pipe(
+    Effect.catchCause(() =>
+      Effect.logWarning("snapshot read failed; authoritative reads required", {
+        component: "SnapshotReader",
+        operation: "read",
+      }).pipe(Effect.as(null)),
+    ),
+  );
+  if (bytes === null) return null;
+  const snapshot = decode(bytes);
+  if (snapshot === null) {
+    yield* Effect.logWarning("snapshot invalid; authoritative reads required", {
+      component: "SnapshotReader",
+      operation: "decode",
+    });
+  }
+  if (snapshot !== null) yield* Telemetry.observed(snapshot.publishedAt);
+  return snapshot;
+});
 const decoder = new TextDecoder();
 
 /** Where a repository's snapshot lives, beside its `objects/` and `pack/`. */

@@ -196,7 +196,11 @@ const load = async (): Promise<PrivateKey | null> => {
 
 const persist = async (key: PrivateKey): Promise<void> => {
   const directory = await store(true);
-  if (directory === null) return;
+  if (directory === null) {
+    identityNote =
+      "browser storage is unavailable; this identity lasts only for this page visit and will change after reload";
+    return;
+  }
   const record = JSON.stringify(
     {
       version: 1,

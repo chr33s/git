@@ -7,13 +7,14 @@ import { createHmac } from "node:crypto";
 import * as http from "node:http";
 import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 
-import { Deferred, Effect, Fiber, Layer, Predicate } from "effect";
+import { Deferred, Effect, Fiber, Layer, Logger, Predicate } from "effect";
 import { TestClock } from "effect/testing";
 import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http";
 
 import type { ReceiveResult } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
-import { deliver, eventOf, sign, subscribersOf } from "./Webhooks.ts";
+import { deliver, eventOf, service, sign, subscribersOf } from "./Webhooks.ts";
+import { Subscribers } from "./Subscribers.ts";
 import { validate } from "./Subscribers.ts";
 
 interface Received {
@@ -71,6 +72,141 @@ const results: ReadonlyArray<ReceiveResult> = [
 ];
 
 describe("Webhooks", () => {
+  it.live("reports a stopped real receiver without exposing its URL or signed payload", () =>
+    Effect.gen(function* () {
+      const stopped = yield* Effect.promise(receiver);
+      yield* Effect.promise(stopped.close);
+      const logged: string[] = [];
+      const capture = Logger.make<unknown, void>(({ message }) => {
+        logged.push(JSON.stringify(message));
+      });
+      const secret = "stopped-receiver-private-secret";
+      yield* deliver(results, { retries: 1, baseDelay: "1 millis" }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            FetchHttpClient.layer,
+            subscribersOf([
+              { id: "stopped-receiver", url: `${stopped.url}?token=${secret}`, secret },
+            ]),
+            Logger.layer([capture]),
+          ),
+        ),
+      );
+      assert.equal(logged.length, 1);
+      const line = logged[0];
+      assert.ok(line);
+      assert.match(line, /"event":"delivery_result"/);
+      assert.match(line, /"outcome":"failed"/);
+      assert.match(line, /"subscriber":"stopped-receiver"/);
+      assert.match(line, /"queueMs":\d+/);
+      assert.match(line, /"durationMs":\d+/);
+      assert.match(line, /reconciliation required/);
+      for (const sensitive of [
+        secret,
+        stopped.url,
+        "refs/heads/main",
+        "a".repeat(40),
+        "b".repeat(40),
+      ])
+        assert.equal(line.includes(sensitive), false);
+    }),
+  );
+
+  it.effect("includes time waiting for the host background scheduler", () => {
+    const logged: string[] = [];
+    const capture = Logger.make<unknown, void>(({ message }) => {
+      logged.push(JSON.stringify(message));
+    });
+    return Effect.gen(function* () {
+      const client = HttpClient.make((request) =>
+        Effect.succeed(HttpClientResponse.fromWeb(request, new Response())),
+      );
+      const hook = service({
+        subscribers: yield* Subscribers,
+        client,
+        options: {
+          background: (effect) =>
+            TestClock.adjust(50).pipe(Effect.andThen(effect), Effect.orDie, Effect.asVoid),
+        },
+      });
+      yield* hook.postReceive(results);
+      assert.equal(logged.length, 1);
+      assert.match(logged[0] ?? "", /"queueMs":50/);
+      assert.match(logged[0] ?? "", /"durationMs":0/);
+    }).pipe(
+      Effect.provide(
+        subscribersOf([{ id: "delayed", url: "https://fixture/hook", secret: "private" }]),
+      ),
+      Effect.provide(Logger.layer([capture])),
+    );
+  });
+
+  it.effect("reports bounded-batch wait and delivery duration without transport secrets", () => {
+    const logged: string[] = [];
+    const capture = Logger.make<unknown, void>(({ message }) => {
+      logged.push(JSON.stringify(message));
+    });
+    return Effect.gen(function* () {
+      const client = HttpClient.make((request) =>
+        Effect.gen(function* () {
+          yield* TestClock.adjust(25);
+          return HttpClientResponse.fromWeb(request, new Response());
+        }),
+      );
+      yield* deliver(results, { retries: 0, concurrency: 1 }).pipe(
+        Effect.provideService(HttpClient.HttpClient, client),
+        Effect.provide(
+          subscribersOf([
+            { id: "first", url: "https://fixture/hook?token=private", secret: "private" },
+            { id: "second", url: "https://fixture/hook?token=private", secret: "private" },
+          ]),
+        ),
+      );
+      assert.equal(logged.length, 2);
+      assert.match(logged[0] ?? "", /"queueMs":0/);
+      assert.match(logged[1] ?? "", /"queueMs":25/);
+      for (const line of logged) {
+        assert.match(line, /"durationMs":25/);
+        assert.match(line, /"outcome":"accepted"/);
+        assert.match(line, /delivery_result/);
+        assert.doesNotMatch(line, /private|https:|refs\/heads/);
+      }
+    }).pipe(Effect.provide(Logger.layer([capture])));
+  });
+
+  it.effect("identifies failed delivery without logging transport secrets", () =>
+    Effect.gen(function* () {
+      const logged: string[] = [];
+      const capture = Logger.make<unknown, void>(({ message }) => {
+        logged.push(JSON.stringify(message));
+      });
+      const secret = "fixture-sensitive-token";
+      const client = HttpClient.make(() => Effect.die(new Error(secret)));
+      yield* deliver(results, { retries: 0 }).pipe(
+        Effect.provideService(HttpClient.HttpClient, client),
+        Effect.provide(
+          subscribersOf([
+            { id: "receiver-1", url: `https://fixture/hook?token=${secret}`, secret },
+          ]),
+        ),
+        Effect.provide(Logger.layer([capture])),
+      );
+      assert.ok(
+        logged.some(
+          (line) => line.includes("receiver-1") && line.includes("reconciliation required"),
+        ),
+      );
+      assert.equal(
+        logged.some((line) => line.includes(secret)),
+        false,
+      );
+      assert.equal(
+        logged.some((line) => line.includes("https://")),
+        false,
+      );
+    }),
+  );
+
   it.effect("retries a timed-out attempt and gives the next attempt its own timeout", () =>
     Effect.gen(function* () {
       const started = yield* Deferred.make<void>();

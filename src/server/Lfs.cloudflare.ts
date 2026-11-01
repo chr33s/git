@@ -17,12 +17,15 @@
 import { bytesToHex, concatBytes } from "../git/Format.ts";
 import { Effect, Layer, Stream } from "effect";
 
-import { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
+import { Invalid, LfsQuotaExceeded, ObjectNotFound, StorageFailure } from "../git/Error.ts";
+import * as Capacity from "./LfsCapacity.cloudflare.ts";
+import { configuration, type Limits } from "./LfsCapacity.ts";
 import { LfsStore } from "./Lfs.ts";
 
 export interface CloudflareLfsOptions {
   readonly bucket: R2Bucket;
   readonly repo: string;
+  readonly capacity?: Limits;
 }
 
 /**
@@ -53,111 +56,154 @@ const digestStream = (algorithm: string): DigestStream =>
   new (crypto as WorkerdCrypto).DigestStream(algorithm);
 
 export const r2 = (options: CloudflareLfsOptions): Layer.Layer<LfsStore> =>
-  Layer.sync(LfsStore, () => {
-    const key = (oid: string) => `${options.repo}/lfs/${oid}`;
-    const failed = (operation: string, oid: string) => (cause: unknown) =>
-      new StorageFailure({ operation, path: key(oid), cause });
+  Layer.effect(
+    LfsStore,
+    Effect.gen(function* () {
+      const limits = options.capacity ?? (yield* configuration().pipe(Effect.orDie));
+      const key = (oid: string) => `${options.repo}/lfs/${oid}`;
+      const failed = (operation: string, oid: string) => (cause: unknown) =>
+        new StorageFailure({ operation, path: key(oid), cause });
 
-    return LfsStore.of({
-      head: (oid) =>
-        Effect.tryPromise({
-          try: async () => {
-            const found = await options.bucket.head(key(oid));
-            return found === null ? null : { oid, size: found.size };
-          },
-          catch: failed("lfs.head", oid),
-        }),
-
-      read: (oid) =>
-        Effect.tryPromise({
-          try: () => options.bucket.get(key(oid)),
-          catch: failed("lfs.read", oid),
-        }).pipe(
-          Effect.flatMap((object) =>
-            object === null || object.body === null
-              ? Effect.fail(new ObjectNotFound({ oid }))
-              : Effect.succeed(
-                  Stream.fromReadableStream({
-                    // SAFETY: R2 serves an object's bytes; the runtime types
-                    // declare `body` without a chunk type.
-                    evaluate: () => object.body as ReadableStream<Uint8Array>,
-                    onError: (cause) =>
-                      new StorageFailure({ operation: "lfs.read", path: key(oid), cause }),
-                  }),
-                ),
-          ),
-        ),
-
-      write: (oid, body) =>
-        Effect.gen(function* () {
-          const written = yield* Effect.tryPromise({
+      return LfsStore.of({
+        head: (oid) =>
+          Effect.tryPromise({
             try: async () => {
-              const digest = digestStream("SHA-256");
-              const hashing = digest.getWriter();
-              let upload: R2MultipartUpload | null = null;
-              const parts: R2UploadedPart[] = [];
-              let pending: Uint8Array[] = [];
-              let buffered = 0;
-              let size = 0;
-
-              /** One part, opening the upload on the first; the upload is returned. */
-              const send = async (
-                open: R2MultipartUpload | null,
-                bytes: Uint8Array,
-              ): Promise<R2MultipartUpload> => {
-                const started = open ?? (await options.bucket.createMultipartUpload(key(oid)));
-                parts.push(await started.uploadPart(parts.length + 1, bytes));
-                return started;
-              };
-
-              try {
-                for await (const chunk of Stream.toAsyncIterable(body)) {
-                  await hashing.write(chunk);
-                  size += chunk.length;
-                  pending.push(chunk);
-                  buffered += chunk.length;
-                  while (buffered >= PART_BYTES) {
-                    const joined = concatBytes(pending);
-                    upload = await send(upload, joined.subarray(0, PART_BYTES));
-                    pending = [joined.subarray(PART_BYTES)];
-                    buffered -= PART_BYTES;
-                  }
-                }
-                await hashing.close();
-                const actual = hex(await digest.digest);
-
-                if (actual !== oid) {
-                  // Nothing was ever visible under the key: a multipart
-                  // upload is not an object until it completes.
-                  await upload?.abort();
-                  return { actual, size };
-                }
-
-                const rest = concatBytes(pending);
-                if (upload === null) {
-                  await options.bucket.put(key(oid), rest);
-                } else {
-                  if (rest.length > 0) upload = await send(upload, rest);
-                  await upload.complete(parts);
-                }
-                return { actual, size };
-              } catch (error) {
-                // The parts already sent are billed storage until aborted,
-                // and the original failure is the one worth reporting.
-                await upload?.abort().catch(() => undefined);
-                throw error;
-              }
+              const found = await options.bucket.head(key(oid));
+              return found === null ? null : { oid, size: found.size };
             },
-            catch: failed("lfs.write", oid),
-          });
+            catch: failed("lfs.head", oid),
+          }),
 
-          if (written.actual !== oid) {
-            return yield* new Invalid({
-              field: "oid",
-              reason: `content hashes to ${written.actual}`,
-            });
-          }
-          return { oid, size: written.size };
-        }),
-    });
-  });
+        read: (oid) =>
+          Effect.tryPromise({
+            try: () => options.bucket.get(key(oid)),
+            catch: failed("lfs.read", oid),
+          }).pipe(
+            Effect.flatMap((object) =>
+              object === null || object.body === null
+                ? Effect.fail(new ObjectNotFound({ oid }))
+                : Effect.succeed(
+                    Stream.fromReadableStream({
+                      // SAFETY: R2 serves an object's bytes; the runtime types
+                      // declare `body` without a chunk type.
+                      evaluate: () => object.body as ReadableStream<Uint8Array>,
+                      onError: (cause) =>
+                        new StorageFailure({ operation: "lfs.read", path: key(oid), cause }),
+                    }),
+                  ),
+            ),
+          ),
+
+        write: Effect.fn("Lfs.r2.write")(function* (
+          oid: string,
+          body: Stream.Stream<Uint8Array, StorageFailure>,
+        ) {
+          const quota = yield* Capacity.reserve(options.bucket, options.repo, limits);
+          let upload: R2MultipartUpload | null = null;
+          let completed = false;
+          let digestClosed = false;
+          const parts: R2UploadedPart[] = [];
+          let pending: Uint8Array[] = [];
+          let buffered = 0;
+          let size = 0;
+
+          const send = async (bytes: Uint8Array): Promise<void> => {
+            // Retain the handle before uploadPart: even failure of the first
+            // part must leave cleanup able to abort the multipart upload.
+            quota.storagePending();
+            upload ??= await options.bucket.createMultipartUpload(key(oid));
+            parts.push(await upload.uploadPart(parts.length + 1, bytes));
+          };
+          return yield* Effect.acquireUseRelease(
+            Effect.sync(() => {
+              const digest = digestStream("SHA-256");
+              // Abort rejects this promise. Observe it immediately, while still
+              // awaiting the original promise when validating completed content.
+              void digest.digest.catch(() => undefined);
+              return { digest, hashing: digest.getWriter() };
+            }),
+            ({ digest, hashing }) =>
+              Effect.gen(function* () {
+                yield* body.pipe(
+                  Stream.runForEach((chunk) =>
+                    Effect.tryPromise({
+                      try: async () => {
+                        quota.consume(chunk.length);
+                        await hashing.write(chunk);
+                        size += chunk.length;
+                        pending.push(chunk);
+                        buffered += chunk.length;
+                        while (buffered >= PART_BYTES) {
+                          const joined = concatBytes(pending);
+                          await send(joined.subarray(0, PART_BYTES));
+                          pending = [joined.subarray(PART_BYTES)];
+                          buffered -= PART_BYTES;
+                        }
+                      },
+                      catch: (cause) =>
+                        cause instanceof LfsQuotaExceeded ? cause : failed("lfs.write", oid)(cause),
+                    }).pipe(Effect.uninterruptible),
+                  ),
+                );
+                const actual = yield* Effect.tryPromise({
+                  try: async () => {
+                    await hashing.close();
+                    digestClosed = true;
+                    return hex(await digest.digest);
+                  },
+                  catch: failed("lfs.hash", oid),
+                }).pipe(Effect.uninterruptible);
+                if (actual !== oid)
+                  return yield* new Invalid({
+                    field: "oid",
+                    reason: `content hashes to ${actual}`,
+                  });
+                yield* Effect.tryPromise({
+                  try: async () => {
+                    const rest = concatBytes(pending);
+                    quota.storagePending();
+                    if (upload === null) await options.bucket.put(key(oid), rest);
+                    else {
+                      if (rest.length > 0) await send(rest);
+                      await upload.complete(parts);
+                    }
+                    completed = true;
+                    quota.storageSettled();
+                  },
+                  catch: failed("lfs.write", oid),
+                }).pipe(Effect.uninterruptible);
+                return { oid, size };
+              }),
+            ({ hashing }) =>
+              Effect.gen(function* () {
+                // Each in-flight R2 call is uninterruptible, so these handles cannot
+                // appear or mutate after the finalizer has inspected them.
+                const unfinished = upload;
+                if (!completed && unfinished !== null)
+                  yield* Effect.tryPromise({
+                    try: async () => {
+                      await unfinished.abort();
+                      quota.storageSettled();
+                    },
+                    catch: failed("lfs.abort", oid),
+                  }).pipe(
+                    Effect.catch(() =>
+                      Effect.logError(
+                        "LFS multipart cleanup failed; reconcile incomplete uploads",
+                        {
+                          component: "Lfs",
+                          event: "multipart_cleanup_failed",
+                          operation: "abort",
+                        },
+                      ),
+                    ),
+                  );
+                if (!digestClosed)
+                  yield* Effect.promise(() => hashing.abort().catch(() => undefined));
+                hashing.releaseLock();
+              }),
+          );
+        }, Effect.scoped),
+      });
+    }),
+  );

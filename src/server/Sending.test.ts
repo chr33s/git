@@ -181,16 +181,16 @@ describe("what a standing instruction carries", () => {
     }),
   );
 
-  it.effect("says which refs a remote refused, rather than reporting nothing", () =>
+  it.effect("identifies refused refs without logging a remote's response body", () =>
     Effect.promise(async () => {
       // A receive-pack that answers at all answers `200`, and the refusals ride
       // inside the response — so a mirror rejecting every ref looked exactly
       // like one keeping up, and the only symptom was a downstream that was
       // quietly months behind. The forward still cannot fail the push that
-      // caused it; what it can do is name the ref and the reason.
+      // caused it; what it can safely log is the remote and the ref.
       const logged: Array<string> = [];
       const capture = Logger.make<unknown, void>(({ message }) => {
-        logged.push(String(message));
+        logged.push(JSON.stringify(message));
       });
 
       // The remote advertises a `main` this repository has never heard of, which
@@ -260,7 +260,11 @@ describe("what a standing instruction carries", () => {
         `nothing said the mirror refused anything: ${logged.join(" | ")}`,
       );
       assert.match(warned ?? "", /refs\/heads\/main/);
-      assert.match(warned ?? "", /non-fast-forward/);
+      assert.match(warned ?? "", /reconciliation required/);
+      const delivery = logged.find((line) => line.includes("delivery_result"));
+      assert.match(delivery ?? "", /"outcome":"refused"/);
+      assert.match(delivery ?? "", /"queueMs":0/);
+      assert.doesNotMatch(delivery ?? "", /https:\/\/|refs\/heads/);
     }),
   );
 

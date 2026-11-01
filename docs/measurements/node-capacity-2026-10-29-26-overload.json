@@ -1,0 +1,138 @@
+{
+  "schemaVersion": 1,
+  "measuredAt": "2026-10-29T15:11:25.029Z",
+  "revision": "54c6199b79d3b121ad7964ac8d0edaeba85b4666",
+  "dirty": true,
+  "platform": "darwin",
+  "arch": "arm64",
+  "osRelease": "27.0.0",
+  "node": "v26.10.0",
+  "git": "git version 2.56.0",
+  "cpu": "Apple M5 Max",
+  "logicalCpus": 18,
+  "totalMemoryBytes": 137438953472,
+  "workload": {
+    "dataMiB": 64,
+    "commits": 64,
+    "concurrency": 16,
+    "packed": true,
+    "private": true,
+    "objects": "count: 0\nsize: 0\nin-pack: 264\npacks: 1\nsize-pack: 65583\nprune-packable: 0\ngarbage: 0\nsize-garbage: 0\n"
+  },
+  "requests": [
+    {
+      "milliseconds": 4440.281959,
+      "transferred": true,
+      "verified": true,
+      "failure": null
+    },
+    {
+      "milliseconds": 4960.166458,
+      "transferred": true,
+      "verified": true,
+      "failure": null
+    },
+    {
+      "milliseconds": 5794.280750000001,
+      "transferred": true,
+      "verified": true,
+      "failure": null
+    },
+    {
+      "milliseconds": 6041.323917000001,
+      "transferred": true,
+      "verified": true,
+      "failure": null
+    },
+    {
+      "milliseconds": 5423.365,
+      "transferred": true,
+      "verified": true,
+      "failure": null
+    },
+    {
+      "milliseconds": 6267.293959,
+      "transferred": true,
+      "verified": true,
+      "failure": null
+    },
+    {
+      "milliseconds": 6397.619709,
+      "transferred": true,
+      "verified": true,
+      "failure": null
+    },
+    {
+      "milliseconds": 6518.428042,
+      "transferred": true,
+      "verified": true,
+      "failure": null
+    },
+    {
+      "milliseconds": 43.957249999999476,
+      "transferred": false,
+      "verified": false,
+      "failure": "http-503"
+    },
+    {
+      "milliseconds": 44.76933299999928,
+      "transferred": false,
+      "verified": false,
+      "failure": "http-503"
+    },
+    {
+      "milliseconds": 42.893332999999984,
+      "transferred": false,
+      "verified": false,
+      "failure": "http-503"
+    },
+    {
+      "milliseconds": 40.15908399999989,
+      "transferred": false,
+      "verified": false,
+      "failure": "http-503"
+    },
+    {
+      "milliseconds": 36.981792000000496,
+      "transferred": false,
+      "verified": false,
+      "failure": "http-503"
+    },
+    {
+      "milliseconds": 39.760958999999275,
+      "transferred": false,
+      "verified": false,
+      "failure": "http-503"
+    },
+    {
+      "milliseconds": 33.87995799999953,
+      "transferred": false,
+      "verified": false,
+      "failure": "http-503"
+    },
+    {
+      "milliseconds": 32.03900000000067,
+      "transferred": false,
+      "verified": false,
+      "failure": "http-503"
+    }
+  ],
+  "elapsedMs": 6531.048958,
+  "recoveryCloneVerified": true,
+  "host": {
+    "baselineRssBytes": 180289536,
+    "maxRssKiB": 441088,
+    "userCpuMicroseconds": 19357847,
+    "systemCpuMicroseconds": 3023853,
+    "fetchGraphSteps": 250000,
+    "limits": {
+      "active": 32,
+      "perRepository": 8,
+      "connections": 128,
+      "deadlineMs": 300000,
+      "idleMs": 30000,
+      "headersMs": 15000
+    }
+  },
+  "limitsOfEvidence": "One loopback burst; shared OS file cache; host metrics exclude Git clients and include recovery clone. Not a supported-size or saturation claim."
+}

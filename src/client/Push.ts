@@ -15,13 +15,20 @@
 import { concatBytes as concat } from "../git/Format.ts";
 import { Effect, Schema, Stream } from "effect";
 
-import { Invalid, type ObjectNotFound, PackCorrupt, type StorageFailure } from "../git/Error.ts";
+import {
+  Invalid,
+  type ObjectNotFound,
+  PackCorrupt,
+  type RequestLimitExceeded,
+  type StorageFailure,
+} from "../git/Error.ts";
 import { FLUSH, pkt, PktReader } from "../git/Pkt.ts";
 import { Repository } from "../git/Repository.ts";
 import { isOid, type Oid } from "../git/Store.ts";
 import { absent } from "../hub/Redaction.ts";
 import { type Authorize, fetchAuthorized, operationOf } from "./Authorize.ts";
 import { prepare as prepareUpload } from "./Upload.ts";
+import * as Transport from "./Transport.ts";
 
 const decoder = new TextDecoder();
 
@@ -194,6 +201,7 @@ export const push = Effect.fn("Client.push")(function* (input: {
   readonly authorize?: Authorize;
 }) {
   const repository = yield* Repository;
+  const transport = yield* Transport.current;
   const { atomic, authorize, force, refs, token, url } = input;
 
   const advertisement = yield* Effect.tryPromise({
@@ -209,6 +217,8 @@ export const push = Effect.fn("Client.push")(function* (input: {
         { headers: authorization(token), signal },
         { operation: operationOf("GET", target), commands: [] },
         authorize,
+        undefined,
+        transport,
       );
       if (!response.ok) throw new Error(`advertisement returned ${response.status}`);
       const advertised = await readAdvertisement(response.body);
@@ -364,6 +374,14 @@ export const push = Effect.fn("Client.push")(function* (input: {
         `${advertisement.url}/git-receive-pack`,
         {
           method: "POST",
+          // Discovery already resolved the canonical URL. Disable fetch's
+          // implicit replay: Node 24 otherwise retains the entire streamed
+          // pack for redirects/authentication (nodejs/undici#4058). Our signed
+          // challenge retry recreates the body explicitly through upload.options.
+          // Workers reject error mode; manual gives them the same refusal
+          // through the status check below. Node needs error to avoid teeing.
+          redirect: globalThis.process?.release?.name === "node" ? "error" : "manual",
+          window: null,
           headers: {
             "content-type": "application/x-git-receive-pack-request",
             ...authorization(advertisement.token),
@@ -383,6 +401,7 @@ export const push = Effect.fn("Client.push")(function* (input: {
         },
         authorize,
         upload.options,
+        transport,
       );
       if (!response.ok) throw new Error(`receive-pack returned ${response.status}`);
       return readReport(response.body, sideband);
@@ -390,7 +409,12 @@ export const push = Effect.fn("Client.push")(function* (input: {
     catch: failure,
   }).pipe(
     Effect.catch(
-      (error): Effect.Effect<never, Invalid | PackCorrupt | ObjectNotFound | StorageFailure> => {
+      (
+        error,
+      ): Effect.Effect<
+        never,
+        Invalid | PackCorrupt | ObjectNotFound | StorageFailure | RequestLimitExceeded
+      > => {
         const cause = upload.failure();
         return cause === undefined ? Effect.fail(error) : Effect.failCause(cause);
       },
@@ -433,6 +457,6 @@ export const push = Effect.fn("Client.push")(function* (input: {
   readonly authorize?: Authorize;
 }) => Effect.Effect<
   ReadonlyArray<PushResult>,
-  Invalid | PackCorrupt | ObjectNotFound | StorageFailure,
+  Invalid | PackCorrupt | ObjectNotFound | StorageFailure | RequestLimitExceeded,
   Repository
 >;

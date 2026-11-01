@@ -9,22 +9,28 @@
  * Refs are rows and objects are keys, with no `.git/refs/heads/main` path
  * string in the middle.
  *
- * Two properties come from the platform rather than from this code:
+ * The platform supplies persistence, but the backend still owns ordering:
  *
- *   - **atomicity** — a Durable Object processes one request at a time, so the
- *     check-then-write in `apply` cannot interleave with another caller's. The
- *     filesystem backend has to buy the same guarantee with `rename(2)`;
- *   - **durability** — `storage.sql` writes are committed when the handler
- *     returns, so a batch that throws part-way is rolled back by the runtime.
+ *   - **atomicity** — `apply` uses an explicit synchronous SQLite transaction.
+ *     Durable Object requests can interleave across external I/O; a whole
+ *     asynchronous handler is not a transaction.
+ *   - **durability** — SQLite uses the platform's persistence/output gates.
+ *     R2 writes/deletes must settle before interruption returns, including
+ *     both mutations of a pack/index pair. There is no transaction spanning
+ *     R2 and SQLite, and a rejected native call can have an uncertain outcome.
  */
-import { Effect, Layer, Option, Predicate, Stream } from "effect";
+import { Effect, Layer, Option, Predicate, Schema, Stream } from "effect";
 
 import { ObjectNotFound, StorageFailure } from "./Error.ts";
+import * as Capacity from "./Capacity.cloudflare.ts";
+import * as HeadCapacity from "./HeadCapacity.cloudflare.ts";
+import * as MetadataCapacity from "./MetadataCapacity.cloudflare.ts";
 import { hashObject } from "./Format.ts";
 import { inflate as nativeInflate } from "./Inflate.zlib.ts";
 import { packed, type PackHandle, PackStore } from "./Packed.ts";
 import {
   checkHeadTarget,
+  checkRefName,
   checkRefNames,
   isOid,
   ObjectStore,
@@ -39,7 +45,70 @@ import {
 } from "./Store.ts";
 
 const failure = (operation: string, target: string) => (cause: unknown) =>
-  new StorageFailure({ operation, path: target, cause });
+  cause instanceof StorageFailure ? cause : new StorageFailure({ operation, path: target, cause });
+
+const StoredOid = Schema.String.pipe(Schema.refine(isOid));
+const decodeOid = Schema.decodeUnknownResult(StoredOid);
+const decodeRef = Schema.decodeUnknownResult(
+  Schema.Struct({ name: Schema.String, oid: StoredOid }),
+);
+const decodeReflog = Schema.decodeUnknownResult(
+  Schema.Struct({
+    old_oid: Schema.NullOr(StoredOid),
+    new_oid: Schema.NullOr(StoredOid),
+    at: Schema.String,
+    message: Schema.String,
+  }),
+);
+const decodeHead = Schema.decodeUnknownEffect(
+  Schema.String.check(Schema.makeFilter((value) => checkRefName(value) === null)),
+);
+
+const reportMutationFailure = Effect.fn("Cloudflare.reportMutationFailure")(function* (
+  error: StorageFailure,
+) {
+  // Only closed categories cross the logging boundary. Paths, native causes,
+  // and arbitrary operation strings can contain repository or credential data.
+  switch (error.operation) {
+    case "quota.bytes":
+    case "quota.keys":
+      return yield* Effect.logWarning("Git retained capacity exhausted", {
+        component: "GitStorage",
+        event: "quota_exceeded",
+        resource: error.operation === "quota.bytes" ? "bytes" : "keys",
+      });
+    case "quota.reservation":
+      return yield* Effect.logWarning(
+        "Git storage reserved; retry or reconcile after stopping writers",
+        { component: "GitStorage", event: "quota_reserved" },
+      );
+    case "quota.metadata.head":
+      return yield* Effect.logWarning("Git HEAD capacity exhausted", {
+        component: "GitStorage",
+        event: "quota_exceeded",
+        resource: "head_bytes",
+      });
+    case "quota.metadata.bytes":
+    case "quota.metadata.rows":
+      return yield* Effect.logWarning("Git ref metadata capacity exhausted", {
+        component: "GitStorage",
+        event: "quota_exceeded",
+        resource: error.operation === "quota.metadata.bytes" ? "metadata_bytes" : "metadata_rows",
+      });
+    case "quota.inspect":
+    case "quota.inventory":
+    case "quota.metadata.accounting":
+      return yield* Effect.logError("Git accounting requires offline reconciliation", {
+        component: "GitStorage",
+        event: "quota_reconciliation_required",
+      });
+    default:
+      return yield* Effect.logError("Git mutation failed; inspect storage and reservations", {
+        component: "GitStorage",
+        event: "mutation_failed",
+      });
+  }
+});
 
 /**
  * Objects in R2, keyed `<repo>/objects/<oid>`.
@@ -120,7 +189,7 @@ export const objectStore = (bucket: R2Bucket, repo: string) =>
                   customMetadata: { type: object.type },
                 }),
               catch: failure("write", key(oid)),
-            });
+            }).pipe(Effect.tapError(reportMutationFailure), Effect.uninterruptible);
 
             return oid;
           }),
@@ -129,7 +198,7 @@ export const objectStore = (bucket: R2Bucket, repo: string) =>
           Effect.tryPromise({
             try: () => bucket.delete(key(oid)),
             catch: failure("delete", key(oid)),
-          }),
+          }).pipe(Effect.tapError(reportMutationFailure), Effect.uninterruptible),
         list: Stream.paginate<string | undefined, Oid, StorageFailure>(undefined, (cursor) => {
           const options: R2ListOptions = { prefix: `${repo}/objects/` };
           if (cursor !== undefined) options.cursor = cursor;
@@ -250,7 +319,7 @@ export const r2Packs = (bucket: R2Bucket, repo: string): PackStore["Service"] =>
           remembered = null;
         },
         catch: failure("packs.write", prefix),
-      }),
+      }).pipe(Effect.tapError(reportMutationFailure), Effect.uninterruptible),
 
     delete: (name) =>
       Effect.tryPromise({
@@ -261,18 +330,23 @@ export const r2Packs = (bucket: R2Bucket, repo: string): PackStore["Service"] =>
           remembered = null;
         },
         catch: failure("packs.delete", prefix),
-      }),
+      }).pipe(Effect.tapError(reportMutationFailure), Effect.uninterruptible),
   };
 };
 
 /**
  * Refs in DO SQLite.
  *
- * One table, one row per ref. The compare-and-swap in `apply` is safe without
- * explicit locking because the Durable Object is single-threaded per instance —
- * that is the whole reason a repository maps onto a DO so neatly.
+ * One row per ref. `apply` compares and mutates refs and reflogs in one
+ * synchronous SQLite transaction, so a later SQL failure rolls back earlier
+ * writes even when Effect catches the exception before the DO handler returns.
  */
-export const refStore = (storage: DurableObjectStorage, repo: string) =>
+export const refStore = (
+  storage: DurableObjectStorage,
+  repo: string,
+  metadata: MetadataCapacity.Limits = MetadataCapacity.defaults,
+  headBytes = HeadCapacity.defaults,
+) =>
   Layer.effect(
     RefStore,
     Effect.sync(() => {
@@ -297,14 +371,19 @@ export const refStore = (storage: DurableObjectStorage, repo: string) =>
         )
       `);
 
+      const corrupt = (field: string) =>
+        new StorageFailure({ operation: `decode.${field}`, path: repo });
+      const storedOid = (value: SqlStorageValue, field: string): Oid => {
+        const decoded = decodeOid(value);
+        if (decoded._tag === "Failure") throw corrupt(field);
+        return decoded.success;
+      };
       const readSync = (name: string): Oid | null => {
         const rows = sql
           .exec<{ oid: string }>(`SELECT oid FROM refs WHERE repo = ? AND name = ?`, repo, name)
           .toArray();
-        const oid = rows[0]?.oid;
-        // Only `apply` writes this table and it only writes oids, so a row
-        // that does not hold one reads as a missing ref, not as an oid.
-        return oid !== undefined && isOid(oid) ? oid : null;
+        const row = rows[0];
+        return row === undefined ? null : storedOid(row.oid, "refs");
       };
 
       const read = (name: string) =>
@@ -314,35 +393,63 @@ export const refStore = (storage: DurableObjectStorage, repo: string) =>
       sql.exec(
         `CREATE TABLE IF NOT EXISTS shallow (repo TEXT NOT NULL, oid TEXT NOT NULL, PRIMARY KEY (repo, oid))`,
       );
-      const head = Effect.tryPromise({
-        try: () => storage.get<string>(headKey),
+      const storedHead = Effect.tryPromise({
+        try: () => storage.get<unknown>(headKey),
         catch: failure("read", headKey),
-      }).pipe(Effect.map((value) => value ?? "refs/heads/main"));
+      }).pipe(
+        Effect.flatMap((value) =>
+          value === undefined
+            ? Effect.succeed("refs/heads/main")
+            : decodeHead(value).pipe(Effect.mapError(() => corrupt("head"))),
+        ),
+      );
+      const boundedHead = (target: string) =>
+        Effect.try({
+          try: () => {
+            if (
+              target.length > headBytes ||
+              new TextEncoder().encode(target).byteLength > headBytes
+            )
+              throw new StorageFailure({ operation: "quota.metadata.head", path: repo });
+            return target;
+          },
+          catch: failure("head.capacity", repo),
+        }).pipe(Effect.tapError(reportMutationFailure));
+      const head = storedHead.pipe(Effect.flatMap(boundedHead));
+      const shallowRows = () =>
+        sql.exec<{ oid: string }>("SELECT oid FROM shallow WHERE repo = ?", repo);
+      const shallowSync = () =>
+        new Set(
+          shallowRows()
+            .toArray()
+            .map((row) => storedOid(row.oid, "shallow")),
+        );
+
+      const capacity = MetadataCapacity.accounting(sql, repo, metadata);
 
       return RefStore.of(
         tracedRefStore("Cloudflare", {
           shallow: Effect.try({
-            try: () =>
-              new Set(
-                sql
-                  .exec<{ oid: string }>("SELECT oid FROM shallow WHERE repo = ?", repo)
-                  .toArray()
-                  .map((row) => row.oid)
-                  .filter(isOid),
-              ),
+            try: shallowSync,
             catch: failure("read", `shallow:${repo}`),
           }),
           updateShallow: ({ add, remove }) =>
             Effect.try({
               try: () =>
                 storage.transactionSync(() => {
+                  capacity.prepare();
+                  // Validate the existing inventory without allocating another Set.
+                  for (const row of shallowRows()) storedOid(row.oid, "shallow");
                   for (const oid of remove)
                     sql.exec("DELETE FROM shallow WHERE repo = ? AND oid = ?", repo, oid);
-                  for (const oid of add)
+                  for (const oid of add) {
                     sql.exec("INSERT OR IGNORE INTO shallow (repo, oid) VALUES (?, ?)", repo, oid);
+                    capacity.check();
+                  }
+                  capacity.check();
                 }),
               catch: failure("write", `shallow:${repo}`),
-            }),
+            }).pipe(Effect.tapError(reportMutationFailure)),
           read,
           resolve: (name) =>
             Effect.gen(function* () {
@@ -365,11 +472,12 @@ export const refStore = (storage: DurableObjectStorage, repo: string) =>
                     repo,
                   )
                   .toArray()
-                  .filter((row) => prefix === undefined || row.name.startsWith(prefix))
-                  // The oid column is only ever written by `apply`, but the
-                  // filter keeps a mangled row out of the list instead of
-                  // dressing it up as an oid.
-                  .flatMap((row) => (isOid(row.oid) ? [[row.name, row.oid] as const] : [])),
+                  .map((row) => {
+                    const decoded = decodeRef(row);
+                    if (decoded._tag === "Failure") throw corrupt("refs");
+                    return [decoded.success.name, decoded.success.oid] as const;
+                  })
+                  .filter(([name]) => prefix === undefined || name.startsWith(prefix)),
               catch: failure("list", repo),
             }),
           apply: (updates, options) =>
@@ -377,64 +485,70 @@ export const refStore = (storage: DurableObjectStorage, repo: string) =>
               yield* checkRefNames(updates);
 
               return yield* Effect.try({
-                try: () => {
-                  const at = new Date().toISOString();
-                  const results: RefUpdateResult[] = [];
-                  const pending: Array<{ from: Oid | null; update: RefUpdate }> = [];
+                try: () =>
+                  storage.transactionSync(() => {
+                    capacity.prepare();
+                    const at = new Date().toISOString();
+                    const results: RefUpdateResult[] = [];
+                    const pending: Array<{ from: Oid | null; update: RefUpdate }> = [];
 
-                  // Check the whole batch before writing any of it, so an atomic
-                  // batch that fails leaves nothing behind.
-                  for (const update of updates) {
-                    const actual = readSync(update.name);
-                    const matches = update.expected === undefined || update.expected === actual;
-                    results.push({
-                      name: update.name,
-                      applied: matches,
-                      current: matches ? update.value : actual,
-                    });
-                    if (matches) pending.push({ from: actual, update });
-                  }
+                    // Check the whole batch before writing any of it, so an atomic
+                    // batch that fails leaves nothing behind.
+                    for (const update of updates) {
+                      const actual = readSync(update.name);
+                      const matches = update.expected === undefined || update.expected === actual;
+                      results.push({
+                        name: update.name,
+                        applied: matches,
+                        current: matches ? update.value : actual,
+                      });
+                      if (matches) pending.push({ from: actual, update });
+                    }
 
-                  if (options?.atomic === true && results.some((result) => !result.applied)) {
-                    return results.map((result) => ({
-                      name: result.name,
-                      applied: false,
-                      current: readSync(result.name),
-                    }));
-                  }
+                    if (options?.atomic === true && results.some((result) => !result.applied)) {
+                      return results.map((result) => ({
+                        name: result.name,
+                        applied: false,
+                        current: readSync(result.name),
+                      }));
+                    }
 
-                  for (const { from, update } of pending) {
-                    if (update.value === null) {
-                      sql.exec(`DELETE FROM refs WHERE repo = ? AND name = ?`, repo, update.name);
-                    } else {
-                      sql.exec(
-                        `INSERT INTO refs (repo, name, oid) VALUES (?, ?, ?)
+                    for (const { from, update } of pending) {
+                      if (update.value === null) {
+                        sql.exec(`DELETE FROM refs WHERE repo = ? AND name = ?`, repo, update.name);
+                      } else {
+                        sql.exec(
+                          `INSERT INTO refs (repo, name, oid) VALUES (?, ?, ?)
                        ON CONFLICT (repo, name) DO UPDATE SET oid = excluded.oid`,
+                          repo,
+                          update.name,
+                          update.value,
+                        );
+                      }
+                      sql.exec(
+                        `INSERT INTO reflog (repo, name, old_oid, new_oid, at, message)
+                     VALUES (?, ?, ?, ?, ?, ?)`,
                         repo,
                         update.name,
+                        from,
                         update.value,
+                        at,
+                        update.reason ?? "update",
                       );
+                      capacity.check();
                     }
-                    sql.exec(
-                      `INSERT INTO reflog (repo, name, old_oid, new_oid, at, message)
-                     VALUES (?, ?, ?, ?, ?, ?)`,
-                      repo,
-                      update.name,
-                      from,
-                      update.value,
-                      at,
-                      update.reason ?? "update",
-                    );
-                  }
 
-                  return results;
-                },
+                    capacity.check();
+                    return results;
+                  }),
                 catch: failure("apply", repo),
-              });
+              }).pipe(Effect.tapError(reportMutationFailure));
             }),
           head,
-          setHead: (target) =>
+          setHead: Effect.fn("Cloudflare.RefStore.setHead")((target) =>
             checkHeadTarget(target).pipe(
+              Effect.andThen(boundedHead(target)),
+              Effect.andThen(storedHead),
               Effect.andThen(
                 Effect.tryPromise({
                   try: () => storage.put(headKey, target),
@@ -442,6 +556,7 @@ export const refStore = (storage: DurableObjectStorage, repo: string) =>
                 }),
               ),
             ),
+          ),
           reflog: (name) =>
             Effect.try({
               try: () =>
@@ -458,14 +573,20 @@ export const refStore = (storage: DurableObjectStorage, repo: string) =>
                     name,
                   )
                   .toArray()
-                  // A null column is "no ref on this side"; a non-oid value in
-                  // a non-null column is a mangled row and reads the same way.
-                  .map((row): ReflogEntry => ({
-                    from: row.old_oid !== null && isOid(row.old_oid) ? row.old_oid : null,
-                    to: row.new_oid !== null && isOid(row.new_oid) ? row.new_oid : null,
-                    at: new Date(row.at),
-                    message: row.message,
-                  })),
+                  .map((row): ReflogEntry => {
+                    const decoded = decodeReflog(row);
+                    if (decoded._tag === "Failure") throw corrupt("reflog");
+                    const value = decoded.success;
+                    const at = new Date(value.at);
+                    if (!Number.isFinite(at.getTime()) || at.toISOString() !== value.at)
+                      throw corrupt("reflog");
+                    return {
+                      from: value.old_oid,
+                      to: value.new_oid,
+                      at,
+                      message: value.message,
+                    };
+                  }),
               catch: failure("reflog", name),
             }),
           logged: Effect.try({
@@ -486,12 +607,24 @@ export const stores = (options: {
   readonly bucket: R2Bucket;
   readonly repo: string;
   readonly storage: DurableObjectStorage;
+  readonly capacity?: Capacity.Limits;
+  readonly metadata?: MetadataCapacity.Limits;
+  readonly headBytes?: number;
 }) =>
-  Layer.mergeAll(
-    objectStore(options.bucket, options.repo),
-    refStore(options.storage, options.repo),
-    // The bucket prefix, which is what actually separates two repositories
-    // here — an origin and its mirror share everything else, the genesis bytes
-    // included; see `Storage`.
-    Layer.succeed(Storage)(options.repo),
-  ).pipe(Layer.provideMerge(packStore(options.bucket, options.repo)));
+  Layer.unwrap(
+    Effect.gen(function* () {
+      const capacity = options.capacity ?? (yield* Capacity.configuration().pipe(Effect.orDie));
+      const metadata =
+        options.metadata ?? (yield* MetadataCapacity.configuration().pipe(Effect.orDie));
+      const headBytes = options.headBytes ?? (yield* HeadCapacity.configuration.pipe(Effect.orDie));
+      const bucket = Capacity.bounded(options.bucket, options.storage, options.repo, capacity);
+      return Layer.mergeAll(
+        objectStore(bucket, options.repo),
+        refStore(options.storage, options.repo, metadata, headBytes),
+        // The bucket prefix, which is what actually separates two repositories
+        // here — an origin and its mirror share everything else, the genesis bytes
+        // included; see `Storage`.
+        Layer.succeed(Storage)(options.repo),
+      ).pipe(Layer.provideMerge(packStore(bucket, options.repo)));
+    }),
+  );

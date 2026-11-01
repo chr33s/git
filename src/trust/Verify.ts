@@ -23,7 +23,12 @@
 import { Effect } from "effect";
 
 import { type Fingerprint, fingerprint, NAMESPACE, verify } from "../crypto/SshSignature.ts";
-import type { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
+import type {
+  Invalid,
+  ObjectNotFound,
+  RequestLimitExceeded,
+  StorageFailure,
+} from "../git/Error.ts";
 import type { Repository } from "../git/Repository.ts";
 import type { Oid } from "../git/Store.ts";
 import { MAX_SIGNATURES, permits } from "./Certificate.ts";
@@ -51,7 +56,11 @@ export interface Made {
  */
 export type Ancestry = (
   head: Oid,
-) => Effect.Effect<ReadonlySet<Oid>, Invalid | ObjectNotFound | StorageFailure, Repository>;
+) => Effect.Effect<
+  ReadonlySet<Oid>,
+  Invalid | ObjectNotFound | RequestLimitExceeded | StorageFailure,
+  Repository
+>;
 
 /**
  * "Is this a trust-log commit at all?", however the caller computes it.
@@ -62,7 +71,11 @@ export type Ancestry = (
  */
 export type Membership = (
   commit: Oid,
-) => Effect.Effect<boolean, Invalid | ObjectNotFound | StorageFailure, Repository>;
+) => Effect.Effect<
+  boolean,
+  Invalid | ObjectNotFound | RequestLimitExceeded | StorageFailure,
+  Repository
+>;
 
 export type Authorization =
   | {

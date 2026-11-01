@@ -24,7 +24,12 @@ import { Effect, Exit } from "effect";
 
 import type { Fingerprint } from "../crypto/SshSignature.ts";
 import * as Dag from "../git/Dag.ts";
-import type { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
+import type {
+  Invalid,
+  ObjectNotFound,
+  RequestLimitExceeded,
+  StorageFailure,
+} from "../git/Error.ts";
 import type { Oid } from "../git/Store.ts";
 import { permits } from "../trust/Certificate.ts";
 import type { Genesis } from "../trust/Genesis.ts";
@@ -326,7 +331,7 @@ const trustHeadOf = (value: string | null): Oid | null => value as Oid | null;
 export const trustReach = () => {
   const walked = new Map<
     Oid,
-    Exit.Exit<ReadonlySet<Oid>, Invalid | ObjectNotFound | StorageFailure>
+    Exit.Exit<ReadonlySet<Oid>, Invalid | ObjectNotFound | RequestLimitExceeded | StorageFailure>
   >();
 
   /**

@@ -1,0 +1,90 @@
+{
+  "date": "2026-10-30",
+  "platform": "darwin",
+  "architecture": "arm64",
+  "scope": "Browser signing identity only; isolated on-disk Playwright profiles on a loopback HTTP origin",
+  "suite": "src/ui/identity.interop.test.ts",
+  "command": "GIT_TEST_BROWSER=<engine> npx vp test run --project interop src/ui/identity.interop.test.ts",
+  "node26": {
+    "runtime": "26.10.0",
+    "results": [
+      {
+        "engine": "chromium",
+        "browserVersion": "156.0.8078.4",
+        "revision": "1248",
+        "passed": 10,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "engine": "firefox",
+        "browserVersion": "157.0",
+        "revision": "1555",
+        "passed": 10,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "engine": "webkit",
+        "browserVersion": "27.2",
+        "revision": "2370",
+        "passed": 10,
+        "failed": 0,
+        "skipped": 0
+      }
+    ]
+  },
+  "coverage": [
+    "browser restart retains identity",
+    "simultaneous tabs share identity",
+    "SecurityError refusal",
+    "NotAllowedError refusal",
+    "quota refusal before returning new identity",
+    "no-OPFS temporary identity disclosure",
+    "directory read failure and retry",
+    "record read failure and retry",
+    "legacy read failure and retry",
+    "migration write failure and retry"
+  ],
+  "observations": [
+    "WebKit 27.2 off-the-record context direct getDirectory probe returned UnknownError; an isolated on-disk profile succeeded.",
+    "Storage fault injection uses StorageManager.prototype and asserts native denial before invoking the application."
+  ],
+  "limitations": [
+    "Not a supported browser matrix decision",
+    "No Safari branded browser certification",
+    "No browser-managed eviction or real disk-quota exhaustion qualification",
+    "No Firefox/WebKit full UI or local Git qualification",
+    "No other operating systems",
+    "Not remote CI evidence"
+  ],
+  "node24": {
+    "runtime": "24.12.0",
+    "results": [
+      {
+        "engine": "chromium",
+        "browserVersion": "156.0.8078.4",
+        "revision": "1248",
+        "passed": 10,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "engine": "firefox",
+        "browserVersion": "157.0",
+        "revision": "1555",
+        "passed": 10,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "engine": "webkit",
+        "browserVersion": "27.2",
+        "revision": "2370",
+        "passed": 10,
+        "failed": 0,
+        "skipped": 0
+      }
+    ]
+  }
+}

@@ -434,6 +434,127 @@ describe("the ref directory", () => {
     }),
   );
 
+  it.effect("reports incomplete rollback and still restores earlier independent refs", () =>
+    Effect.promise(async () => {
+      await withRoot(async (root) => {
+        // A packed parent can coexist with the directory created while reserving
+        // a proposed child. Deleting it removes its packed entry before removal
+        // of the directory fails; restoring it as a loose file also fails.
+        await fs.writeFile(path.join(root, "packed-refs"), `${oid} refs/heads/parent\n`);
+        const outcome = await Effect.runPromise(
+          Effect.gen(function* () {
+            const refs = yield* RefStore;
+            yield* refs.apply([{ name: "refs/heads/independent", value: oid }]);
+            return yield* refs
+              .apply(
+                [
+                  { name: "refs/heads/independent", value: other },
+                  { name: "refs/heads/parent", value: null },
+                  { name: "refs/heads/parent/child", value: other },
+                ],
+                { atomic: true },
+              )
+              .pipe(Effect.result);
+          }).pipe(Effect.provide(stores(root))),
+        );
+        assert.equal(
+          outcome._tag,
+          "Failure",
+          "partial rollback must not report ordinary rejection",
+        );
+        if (outcome._tag !== "Failure") return;
+        assert.equal(outcome.failure._tag, "StorageFailure");
+        if (outcome.failure._tag !== "StorageFailure") return;
+        assert.equal(outcome.failure.operation, "rollback");
+        // The earlier independent update is restored, but reopening must not
+        // silently serve the partially rolled-back repository.
+        assert.equal(
+          await fs.readFile(path.join(root, "refs/heads/independent"), "utf8"),
+          `${oid}\n`,
+        );
+        assert.doesNotMatch(
+          await fs.readFile(path.join(root, "packed-refs"), "utf8"),
+          /refs\/heads\/parent/,
+        );
+        const blocked = await Effect.runPromise(
+          RefStore.use((refs) => refs.read("refs/heads/independent")).pipe(
+            Effect.provide(stores(root)),
+            Effect.result,
+          ),
+        );
+        assert.equal(blocked._tag, "Failure");
+        if (blocked._tag === "Failure") {
+          assert.equal(blocked.failure.operation, "ref.transaction");
+        }
+        assert.equal(
+          (await fs.stat(path.join(root, ".git-plus-ref-transaction.json"))).mode & 0o777,
+          0o600,
+        );
+        assert.equal(
+          await fs.stat(path.join(root, "refs/heads/independent.lock")).then(
+            () => true,
+            () => false,
+          ),
+          false,
+        );
+      });
+    }),
+  );
+
+  it.effect("preserves symbolic ref text when rolling back an atomic batch", () =>
+    Effect.promise(async () => {
+      await withRoot(async (root) => {
+        const target = path.join(root, "refs/remotes/origin/HEAD");
+        await fs.mkdir(path.dirname(target), { recursive: true });
+        const symbolic = "ref: refs/heads/main\n";
+        await fs.writeFile(target, symbolic);
+        const result = await Effect.runPromise(
+          RefStore.use((refs) =>
+            refs.apply(
+              [
+                { name: "refs/remotes/origin/HEAD", value: oid },
+                { name: "refs/heads/feature", value: other },
+                { name: "refs/heads/feature/sub", value: other },
+              ],
+              { atomic: true },
+            ),
+          ).pipe(Effect.provide(stores(root))),
+        );
+        assert.ok(result.every((row) => !row.applied));
+        assert.equal(await fs.readFile(target, "utf8"), symbolic);
+        await assert.rejects(fs.stat(path.join(root, ".git-plus-ref-transaction.json")), {
+          code: "ENOENT",
+        });
+      });
+    }),
+  );
+
+  it.effect("refuses to overwrite malformed transaction evidence", () =>
+    Effect.promise(async () => {
+      await withRoot(async (root) => {
+        const journal = path.join(root, ".git-plus-ref-transaction.json");
+        for (const contents of ["", "{", "[]", '{"version":999}']) {
+          await fs.writeFile(journal, contents);
+          const outcomes = await Effect.runPromise(
+            RefStore.use((refs) =>
+              Effect.forEach(
+                [
+                  refs.read("refs/heads/main").pipe(Effect.asVoid),
+                  refs.list().pipe(Effect.asVoid),
+                  refs.apply([{ name: "refs/heads/main", value: oid }]).pipe(Effect.asVoid),
+                ],
+                (operation) => Effect.result(operation),
+              ),
+            ).pipe(Effect.provide(stores(root))),
+          );
+          assert.ok(outcomes.every((result) => result._tag === "Failure"));
+          assert.equal(await fs.readFile(journal, "utf8"), contents);
+          await assert.rejects(fs.stat(`${journal}.lock`), { code: "ENOENT" });
+        }
+      });
+    }),
+  );
+
   it.effect("lists loose objects without mistaking pack files for them", () =>
     Effect.promise(async () => {
       const listed = await withRoot(async (root) => {

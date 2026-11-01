@@ -17,7 +17,7 @@
  * told so, and a remote that is down is the remote's problem. So this runs
  * detached and logs, exactly as delivery does.
  */
-import { Effect, Layer } from "effect";
+import { Cause, Clock, Effect, Exit, Layer } from "effect";
 
 import { push, type PushRef } from "../client/Push.ts";
 import { Hooks, type ReceiveResult, Repository } from "../git/Repository.ts";
@@ -76,7 +76,7 @@ const forward = Effect.fn("Sending.forward")(function* (
   results: ReadonlyArray<ReceiveResult>,
 ) {
   const carried = covered(remote, results);
-  if (carried.length === 0) return;
+  if (carried.length === 0) return { accepted: 0, refused: 0 };
 
   // Sent as the *value* the push landed, not as the ref's name. A forward is
   // detached from the push that caused it, so by the time it runs a ref may
@@ -108,16 +108,18 @@ const forward = Effect.fn("Sending.forward")(function* (
   // rejecting every ref, on a stale credential or a ref it will not
   // fast-forward, was indistinguishable here from one keeping up. The
   // forwarding still cannot fail the push that caused it, so what this can do
-  // about a refusal is say which ref and why, in the log the operator reads
-  // when the mirror turns out to be behind.
-  const refused = (yield* push(request)).filter((result) => !result.ok);
+  // about a refusal is name the remote and refs. Peer-supplied reason strings
+  // and transport errors can contain credentials, so they stay out of logs.
+  const outcomes = yield* push(request);
+  const refused = outcomes.filter((result) => !result.ok);
   if (refused.length > 0) {
-    yield* Effect.logWarning(
-      `replication to ${remote.name} refused ${refused
-        .map((result) => `${result.ref} (${result.reason ?? "no reason given"})`)
-        .join(", ")}`,
-    );
+    yield* Effect.logWarning("replication refused; reconciliation required", {
+      operation: "Sending.forward",
+      remote: remote.name,
+      refs: refused.map((result) => result.ref),
+    });
   }
+  return { accepted: outcomes.length - refused.length, refused: refused.length };
 });
 
 export interface SendingOptions {
@@ -154,27 +156,60 @@ export const service = (input: {
   return Hooks.of({
     preReceive: () => Effect.void,
     update: () => Effect.void,
-    postReceive: (results) =>
-      background(
+    postReceive: Effect.fn("Sending.postReceive")(function* (
+      results: ReadonlyArray<ReceiveResult>,
+    ) {
+      const queued = yield* Clock.currentTimeMillis;
+      yield* background(
         Effect.gen(function* () {
-          const configured = (yield* registry.list.pipe(Effect.orElseSucceed(() => []))).filter(
-            sends,
-          );
+          const configured = (yield* registry.list.pipe(
+            Effect.catch(() =>
+              Effect.logWarning("replication registry unavailable; reconciliation required", {
+                operation: "Sending.list",
+              }).pipe(Effect.as([])),
+            ),
+          )).filter(sends);
           yield* Effect.forEach(
             configured,
             (remote) =>
-              forward(remote, results).pipe(
-                Effect.catchCause((cause) =>
-                  Effect.logWarning(`replication to ${remote.name} failed`, cause),
-                ),
-              ),
+              Effect.gen(function* () {
+                const started = yield* Clock.currentTimeMillis;
+                const result = yield* forward(remote, results).pipe(Effect.exit);
+                const failed = Exit.isFailure(result);
+                const outcome = failed
+                  ? Cause.hasInterruptsOnly(result.cause)
+                    ? "cancelled"
+                    : "failed"
+                  : result.value.refused > 0
+                    ? "refused"
+                    : result.value.accepted > 0
+                      ? "accepted"
+                      : "skipped";
+                const fields = {
+                  component: "Sending",
+                  operation: "Sending.forward",
+                  event: "delivery_result",
+                  outcome,
+                  remote: remote.name,
+                  queueMs: Math.max(0, started - queued),
+                  durationMs: Math.max(0, (yield* Clock.currentTimeMillis) - started),
+                };
+                if (failed)
+                  yield* Effect.logWarning("replication failed; reconciliation required", fields);
+                else yield* Effect.logInfo("replication attempt finished", fields);
+              }),
             { concurrency: 4, discard: true },
           );
         }).pipe(
           using,
-          Effect.catchCause((cause) => Effect.logWarning("replication failed", cause)),
+          Effect.catchCause(() =>
+            Effect.logWarning("replication failed; reconciliation required", {
+              operation: "Sending.postReceive",
+            }),
+          ),
         ),
-      ),
+      );
+    }),
   });
 };
 

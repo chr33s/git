@@ -1,0 +1,47 @@
+{
+  "date": "2026-10-30",
+  "platform": "darwin",
+  "architecture": "arm64",
+  "git": "git version 2.56.0",
+  "head": "54c6199b79d3b121ad7964ac8d0edaeba85b4666",
+  "sourceState": "Uncommitted worktree; not a release artifact certification",
+  "sourceFingerprint": {
+    "algorithm": "sha256",
+    "selection": "git ls-files --cached --others --exclude-standard -- src tools patches package.json package-lock.json tsconfig.json vite.config.ts .github; unique sorted paths, path NUL contents NUL",
+    "files": 652,
+    "digest": "771cdd14b18f712a9d60effe0c8d14d39f2a0df0c496075a3e91b4109192d9f0",
+    "unchangedAcrossBothRuns": true
+  },
+  "results": [
+    {
+      "node": "26.10.0",
+      "command": "npm test -- --reporter=default --reporter=./tools/release-test-reporter.ts",
+      "exitCode": 0,
+      "files": 262,
+      "passed": 2746,
+      "skipped": 11,
+      "durationSeconds": 479.29,
+      "strictReporter": true,
+      "logSha256": "7162ac3efc113b12d07880fbfdee71e7fb4ccd9c97a8e894ee5eeed42235b96f"
+    },
+    {
+      "node": "24.12.0",
+      "command": "npm exec --yes --package=node@24.12.0 -- node node_modules/vite-plus/bin/vp test run --reporter=default --reporter=./tools/release-test-reporter.ts",
+      "exitCode": 0,
+      "files": 262,
+      "passed": 2746,
+      "skipped": 11,
+      "durationSeconds": 504.54,
+      "strictReporter": true,
+      "logSha256": "9454a86c8ed1d32d104103bfe777f0b30042b7787d454c31b14b5b59d614f37b"
+    }
+  ],
+  "prerequisiteEvidence": "node tools/release-preflight.ts standalone passed with Git 2.56.0/backend, SSH, tar/unzip, Chromium, source baseline, existing CLI/helper and UI assets",
+  "limitsOfEvidence": [
+    "macOS arm64 source suite only; not expanded remote CI or target-account qualification",
+    "Existing standalone binary exercised but not rebuilt/certified for this source fingerprint",
+    "Ignored generated inputs and dist artifacts are excluded from the source fingerprint",
+    "Workflow attestation configuration is not exercised by the source suite; real signing/verification remains pending",
+    "Supported platform/channel decisions, deployed capacity/recovery and operator acceptance remain open"
+  ]
+}

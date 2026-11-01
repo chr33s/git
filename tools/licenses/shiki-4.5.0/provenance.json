@@ -1,0 +1,38 @@
+[
+  {
+    "package": "@shikijs/langs",
+    "version": "4.5.0",
+    "sourcePackage": "tm-grammars",
+    "sourceVersion": "1.32.22",
+    "sourceIntegrity": "sha512-VKWL+UiqlGqbGHonRbrBc0kkqDIHUUiVO/A2rBTBz5LBXKA8Fe2f34O1YiBI7ED37tTUlT3MGmLf9+0F/H4/Ww==",
+    "upstreamLock": "https://github.com/shikijs/shiki/blob/f7d0167873fd676fe4e190bc9b53832fba9ee01d/pnpm-lock.yaml",
+    "files": [
+      {
+        "file": "tools/licenses/shiki-4.5.0/tm-grammars.LICENSE",
+        "sha256": "7a9d8d01038aeacf9e5bcdabbddf2a7815200dce9fc1118468cc553e00ae3eee"
+      },
+      {
+        "file": "tools/licenses/shiki-4.5.0/tm-grammars.NOTICE",
+        "sha256": "26b10bb42960080d6dfabcd1d4f2ae69a5bf104b30fea399c646f598551e7519"
+      }
+    ]
+  },
+  {
+    "package": "@shikijs/themes",
+    "version": "4.5.0",
+    "sourcePackage": "tm-themes",
+    "sourceVersion": "1.12.12",
+    "sourceIntegrity": "sha512-okyxQlASpDOtUA40+ZT0IGQyfObGOknntHY3kujfUlD8lj3ERMObDJNRgvlc/baVMsnJVQmtAB2nE7LFGTo0qQ==",
+    "upstreamLock": "https://github.com/shikijs/shiki/blob/f7d0167873fd676fe4e190bc9b53832fba9ee01d/pnpm-lock.yaml",
+    "files": [
+      {
+        "file": "tools/licenses/shiki-4.5.0/tm-themes.LICENSE",
+        "sha256": "7a9d8d01038aeacf9e5bcdabbddf2a7815200dce9fc1118468cc553e00ae3eee"
+      },
+      {
+        "file": "tools/licenses/shiki-4.5.0/tm-themes.NOTICE",
+        "sha256": "5562622d13daf3f745bca7ccdc2bf3f77d6720cf5d41f1ee34e3e46cf4e226f9"
+      }
+    ]
+  }
+]

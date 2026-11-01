@@ -15,7 +15,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, beforeAll, describe, it } from "@effect/vitest";
 
-import { Effect, Stream } from "effect";
+import { Deferred, Effect, Fiber, Stream } from "effect";
 
 import { StorageFailure } from "../git/Error.ts";
 
@@ -96,6 +96,52 @@ describe("Git LFS", () => {
       assert.equal(got.headers.get("content-length"), String(content.length));
     }),
   );
+
+  for (const fault of ["invalid-shard", "directory-object"] as const) {
+    it.effect(`reports ${fault} as a storage outage and recovers after repair`, () =>
+      Effect.promise(async () => {
+        const repo = `outage-${fault}`;
+        const content = "LFS storage outage recovery";
+        const oid = sha256(content);
+        const directory = path.join(root, repo, "lfs");
+        const target = path.join(directory, oid.slice(0, 2), oid.slice(2, 4), oid);
+        const broken = fault === "invalid-shard" ? path.dirname(target) : target;
+        await fs.mkdir(path.dirname(broken), { recursive: true });
+        if (fault === "invalid-shard") await fs.writeFile(broken, "not a directory");
+        else await fs.mkdir(broken);
+        const href = `${server.url}/${repo}/info/lfs/objects/${oid}`;
+        try {
+          for (const operation of ["download", "upload"] as const) {
+            const asked = await batch(repo, operation, [{ oid, size: content.length }]);
+            assert.equal(asked.status, 200);
+            assert.equal(asked.body.objects[0]?.error?.code, 500);
+            assert.equal(asked.body.objects[0]?.actions, undefined);
+          }
+          const response = await fetch(href);
+          assert.equal(response.status, 500);
+          assert.match(await response.text(), /object storage unavailable/);
+          const direct = await Effect.runPromise(
+            LfsStore.use((store) => store.read(oid)).pipe(
+              Effect.provide(file(directory)),
+              Effect.flip,
+            ),
+          );
+          assert.equal(direct._tag, "StorageFailure");
+        } finally {
+          await fs.rm(broken, { recursive: true, force: true });
+        }
+        const absent = await fetch(href);
+        assert.equal(absent.status, 404);
+        await absent.arrayBuffer();
+        const upload = await fetch(href, { method: "PUT", body: content });
+        assert.equal(upload.status, 200);
+        await upload.arrayBuffer();
+        const recovered = await fetch(href);
+        assert.equal(recovered.status, 200);
+        assert.equal(await recovered.text(), content);
+      }),
+    );
+  }
 
   it.effect("refuses content that does not hash to the name it was given", () =>
     Effect.promise(async () => {
@@ -200,5 +246,138 @@ describe("Git LFS", () => {
       );
       yield* Effect.promise(() => fs.rm(root, { recursive: true, force: true }));
     }),
+  );
+
+  it.effect("publishes private files through new directory chains and reopens them", () =>
+    Effect.promise(async () => {
+      const base = await fs.mkdtemp(path.join(os.tmpdir(), "lfs-publish-"));
+      const directory = path.join(base, "new", "repository", "lfs");
+      const content = "durable publication fixture";
+      const oid = sha256(content);
+      const target = path.join(directory, oid.slice(0, 2), oid.slice(2, 4), oid);
+      try {
+        const result = await Effect.runPromise(
+          LfsStore.use((store) =>
+            store.write(oid, Stream.make(new TextEncoder().encode(content))),
+          ).pipe(Effect.provide(file(directory))),
+        );
+        assert.deepEqual(result, { oid, size: content.length });
+        assert.equal((await fs.stat(target)).mode & 0o777, 0o600);
+        assert.equal((await fs.stat(path.dirname(target))).mode & 0o777, 0o700);
+        assert.equal((await fs.stat(path.join(base, "new"))).mode & 0o777, 0o700);
+        const reopened = await Effect.runPromise(
+          LfsStore.use((store) => store.read(oid).pipe(Effect.flatMap(Stream.runCollect))).pipe(
+            Effect.provide(file(directory)),
+          ),
+        );
+        assert.equal(Buffer.concat([...reopened]).toString(), content);
+        assert.deepEqual(
+          (await fs.readdir(directory, { recursive: true })).filter((entry) =>
+            entry.endsWith(".tmp"),
+          ),
+          [],
+        );
+      } finally {
+        await fs.rm(base, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.effect("reports publication failure and removes the fully written temporary file", () =>
+    Effect.promise(async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "lfs-rename-"));
+      const content = "verified bytes cannot be published";
+      const oid = sha256(content);
+      const target = path.join(root, oid.slice(0, 2), oid.slice(2, 4), oid);
+      try {
+        await fs.mkdir(target, { recursive: true });
+        const outcome = await Effect.runPromise(
+          LfsStore.use((store) =>
+            store.write(oid, Stream.make(new TextEncoder().encode(content))),
+          ).pipe(Effect.provide(file(root)), Effect.result),
+        );
+        assert.equal(outcome._tag, "Failure");
+        if (outcome._tag !== "Failure") return;
+        assert.equal(outcome.failure._tag, "StorageFailure");
+        assert.equal((await fs.stat(target)).isDirectory(), true);
+        assert.deepEqual(
+          (await fs.readdir(root, { recursive: true })).filter((entry) => entry.endsWith(".tmp")),
+          [],
+        );
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.effect("interrupts an unfinished upload before removing its temporary file", () =>
+    Effect.gen(function* () {
+      const root = yield* Effect.promise(() =>
+        fs.mkdtemp(path.join(os.tmpdir(), "lfs-interrupt-")),
+      );
+      yield* Effect.addFinalizer(() =>
+        Effect.promise(() => fs.rm(root, { recursive: true, force: true })),
+      );
+      const started = yield* Deferred.make<void>();
+      let finalized = false;
+      const body = Stream.make(new TextEncoder().encode("partial")).pipe(
+        Stream.concat(Stream.fromEffect(Deferred.succeed(started, undefined)).pipe(Stream.drain)),
+        Stream.concat(Stream.never),
+        Stream.ensuring(
+          Effect.sync(() => {
+            finalized = true;
+          }),
+        ),
+      );
+      const upload = yield* LfsStore.use((store) =>
+        store.write(sha256("partial and more"), body),
+      ).pipe(Effect.provide(file(root)), Effect.forkScoped);
+      yield* Deferred.await(started);
+      yield* Fiber.interrupt(upload);
+      assert.equal(finalized, true, "interruption must close the source before returning");
+      const remaining = yield* Effect.promise(() => fs.readdir(root, { recursive: true }));
+      assert.deepEqual(
+        remaining.filter((entry) => entry.endsWith(".tmp")),
+        [],
+      );
+      const stored = yield* LfsStore.use((store) => store.head(sha256("partial and more"))).pipe(
+        Effect.provide(file(root)),
+      );
+      assert.equal(stored, null);
+    }),
+  );
+
+  it.effect.skipIf(process.getuid?.() === 0)(
+    "closes an unfinished source when the disk refuses its upload",
+    () =>
+      Effect.gen(function* () {
+        const root = yield* Effect.promise(() => fs.mkdtemp(path.join(os.tmpdir(), "lfs-disk-")));
+        const oid = sha256("cannot write");
+        const shard = path.join(root, oid.slice(0, 2), oid.slice(2, 4));
+        yield* Effect.promise(() => fs.mkdir(shard, { recursive: true }));
+        yield* Effect.addFinalizer(() =>
+          Effect.promise(async () => {
+            await fs.chmod(shard, 0o700);
+            await fs.rm(root, { recursive: true, force: true });
+          }),
+        );
+        yield* Effect.promise(() => fs.chmod(shard, 0o500));
+        let finalized = false;
+        const body = Stream.make(new TextEncoder().encode("partial")).pipe(
+          Stream.concat(Stream.never),
+          Stream.ensuring(
+            Effect.sync(() => {
+              finalized = true;
+            }),
+          ),
+        );
+        const result = yield* LfsStore.use((store) => store.write(oid, body)).pipe(
+          Effect.provide(file(root)),
+          Effect.result,
+        );
+        assert.equal(result._tag, "Failure");
+        assert.equal(finalized, true, "disk failure must stop the source's pending read");
+        assert.deepEqual(yield* Effect.promise(() => fs.readdir(shard)), []);
+      }),
   );
 });

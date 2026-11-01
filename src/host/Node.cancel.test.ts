@@ -33,6 +33,7 @@ for (const queuedWrite of [false, true]) {
       const server = await serve({
         root,
         allowAnonymousWrites: true,
+        allowLoopbackEgress: true,
         development: async (listener) => {
           listener.on("request", (request, response) => {
             if (request.url !== "/repo/commit") return;

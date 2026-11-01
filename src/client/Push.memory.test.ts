@@ -5,9 +5,11 @@ import { Effect } from "effect";
 import { hasGit } from "../testing/Git.ts";
 
 describe.skipIf(!hasGit)("push memory", () => {
-  it.live("keeps live upload buffers below half of a 64 MiB pack", () =>
-    Effect.promise(async () => {
-      const script = `
+  it.live.each([false, true])(
+    "keeps live upload buffers below half of a 64 MiB pack (egress=%s)",
+    (restricted) =>
+      Effect.promise(async () => {
+        const script = `
         import assert from "node:assert/strict";
         import * as fs from "node:fs/promises";
         import * as os from "node:os";
@@ -21,6 +23,9 @@ describe.skipIf(!hasGit)("push memory", () => {
         import { gitIn, gitEnv } from ${JSON.stringify(new URL("../testing/Git.ts", import.meta.url).href)};
         import { pkt, FLUSH } from ${JSON.stringify(new URL("../git/Pkt.ts", import.meta.url).href)};
         import { push } from ${JSON.stringify(new URL("./Push.ts", import.meta.url).href)};
+        import { Transport } from ${JSON.stringify(new URL("./Transport.ts", import.meta.url).href)};
+        import * as Egress from ${JSON.stringify(new URL("../host/Egress.node.ts", import.meta.url).href)};
+        let egress;
         const root = await fs.mkdtemp(path.join(os.tmpdir(), "push-memory-"));
         const source = path.join(root, "source");
         const target = path.join(root, "target.git");
@@ -51,6 +56,9 @@ describe.skipIf(!hasGit)("push memory", () => {
             Repository.layer.pipe(Layer.provide(Repository.hooksNoop), Layer.provide(stores(path.join(source, ".git"))))
           )));
           await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+          const url = "http://127.0.0.1:" + server.address().port;
+          egress = Egress.make(Egress.origins([url]));
+          const network = ${JSON.stringify(restricted)} ? Layer.succeed(Transport)({ fetch: egress.fetch }) : Layer.empty;
           global.gc();
           const baseline = process.memoryUsage().arrayBuffers;
           const sample = () => { global.gc(); return process.memoryUsage().arrayBuffers - baseline; };
@@ -65,27 +73,30 @@ describe.skipIf(!hasGit)("push memory", () => {
             if (init?.method === "POST") peak = Math.max(peak, sample());
             return original(input, init);
           };
-          const result = await Effect.runPromise(push({url: "http://127.0.0.1:" + server.address().port,
+          const result = await Effect.runPromise(push({url,
             refs: [{local: "refs/heads/main", remote: "refs/heads/main"}]
-          }).pipe(Effect.provideService(Repository.Repository, measured)));
+          }).pipe(Effect.provideService(Repository.Repository, measured), Effect.provide(network)));
           assert.equal(result[0].ok, true);
           assert.ok(bytes > 64 * 1024 * 1024);
           assert.ok(peak < bytes / 2, "live upload buffers " + peak + " for pack " + bytes);
           assert.equal(git("--git-dir", target, "ls-tree", "-r", "--name-only", "main").trim().split("\\n").length, 64);
           console.log(JSON.stringify({bytes, peak}));
         } finally {
+          await egress?.close();
           server.closeAllConnections();
           await new Promise(resolve => server.close(resolve));
           for (const child of children) { child.receiver.kill(); await child.stopped; }
           await fs.rm(root, {recursive: true, force: true});
         }
       `;
-      const result = await promisify(execFile)(
-        process.execPath,
-        ["--expose-gc", "--input-type=module", "-e", script],
-        { timeout: 60_000 },
-      );
-      console.info(result.stdout.trim());
-    }),
+        const result = await promisify(execFile)(
+          process.execPath,
+          ["--expose-gc", "--input-type=module", "-e", script],
+          // The suite allows 120 seconds on a loaded machine. Leave time for
+          // cleanup while retaining the same measured live-buffer assertion.
+          { timeout: 100_000 },
+        );
+        console.info(result.stdout.trim());
+      }),
   );
 });

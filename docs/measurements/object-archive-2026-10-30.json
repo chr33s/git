@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-30",
+  "kind": "signed-object-disk-archive",
+  "sourceSha256": {
+    "tools/cloudflare-object-archive.ts": "24867a97d430db8e349971eec0c0a6d4bb52d739c07d3428cad2571bf11e5000",
+    "tools/cloudflare-object-import.ts": "d6734fa753194a5fa17f753f121fb4f67d8f34db71ae7bc531349ba09fb182ce",
+    "tools/cloudflare-backup-auth.ts": "b8894dd510cee98e1a1c0ea2298606c0983db9afb849d16bbabae05c44970f2f",
+    "tools/cloudflare-backup-inventory.ts": "ddd8386bdee1b23ccba944450e6786d09d39fb02f16adc0f1757c337a68b60dd",
+    "src/host/CloudflareBackupAdmin.ts": "449e9fd316f3acb0086430b84dd3336089a92e52281a8f9cc36bac75214e92b1",
+    "src/testing/BackupCodec.worker.ts": "322ad94eb10f540bc9e8383a5a69736cff21ab940b03589fad9a0ba7954121d9",
+    "src/testing/BackupApplication.worker.ts": "ca02796772634995da34475d58ffb663d7713196edbdf0306c7f3d04510feae1",
+    "src/host/BackupCodec.test.ts": "b91fff570d3e31821cd066559780697cb2bae77372f9f4143493241ea7418a05"
+  },
+  "tests": {
+    "node24.12.0": {
+      "files": 1,
+      "passed": 2,
+      "logSha256": "1138f7339285070eb3f646f4c4f87fcac3bae8513f0fefde0e5e12e8fe313ff8"
+    },
+    "node26.10.0": {
+      "files": 1,
+      "passed": 2,
+      "logSha256": "c0b8dee9431f58695b001b18e2219b0747c84454079fc98cf5d20a6fd2566302"
+    }
+  },
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "c24887868a4e8ccb863dec4d07baf4ceb3f8253e8f8905ed2780860422af6237"
+  },
+  "coverage": [
+    "Native production-service SQL/KV capture through private administration into signed bounded disk packet files.",
+    "Exclusive private directory and file permissions; partial capture has no successful completion and leaves source fenced.",
+    "Complete authentication and resource verification before first target RPC.",
+    "Tampered, truncated, oversized, symlinked, missing-completion and resource-mismatched archives reject before touching target.",
+    "Lost apply acknowledgement plus real target eviction resumes from the verified durable prefix without reapplying committed packets.",
+    "Different authentic archive cannot extend an existing prefix; completed retry remains idempotent.",
+    "Restored application service state equals source, including repository quotas, credentials, snapshots, packs and LFS backed by the fixture R2 copy."
+  ],
+  "limits": [
+    "Programmatic single-object transport, not a configured remote operator CLI or whole-installation coordinator.",
+    "One million frame ceiling; production workload and POSIX filesystem qualification remain open.",
+    "Archives are plaintext; encryption, retention and protected custody are external responsibilities.",
+    "Capture failure restarts in a new directory; target restore is resumable.",
+    "No deployment or global isolation/enumeration/recovery qualification."
+  ]
+}

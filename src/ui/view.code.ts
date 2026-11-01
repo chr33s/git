@@ -218,6 +218,7 @@ const clone = (h: H, model: Model, url: string): Html.Html =>
     h.button(
       [
         h.Class("gp-btn-primary"),
+        h.DataAttribute("dialog-trigger", "clone"),
         h.OnClick(AppMessage.ClickedOpenDialog({ name: "clone" })),
         h.Type("button"),
       ],
@@ -316,6 +317,7 @@ const propose = (h: H, model: Model, view: CodeView): Html.Html =>
     h.button(
       [
         h.Class("gp-btn-primary"),
+        h.DataAttribute("dialog-trigger", "propose"),
         h.OnClick(AppMessage.ClickedOpenDialog({ name: "propose" })),
         h.Type("button"),
         h.Disabled(model.codeScreen.syncing),

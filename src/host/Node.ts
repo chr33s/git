@@ -14,7 +14,7 @@ import * as fs from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import * as path from "node:path";
 import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
+import { finished, pipeline } from "node:stream/promises";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
 
 import { Context, Effect, Exit, Layer, Predicate, RcMap, Scope } from "effect";
@@ -41,10 +41,17 @@ import { file as lfsFile } from "../server/Lfs.node.ts";
 import { file as remotesFile } from "../server/Remotes.node.ts";
 import { collects, readsStore, routeOf, settledWithin, UI_HOME } from "../server/Route.ts";
 import * as Router from "../server/Router.ts";
+import * as RequestLimits from "../server/RequestLimits.ts";
 import { assetResponse, type AssetSource } from "../server/Static.node.ts";
 import { file as subscribersFile } from "../server/Subscribers.node.ts";
+import * as RegistryCapacity from "../server/RegistryCapacity.ts";
 import { resolve as resolveConfiguration, type ServeConfig } from "./ServeConfig.ts";
 import { stores as writableStores } from "./NodeStorage.ts";
+import * as Admission from "./Admission.node.ts";
+import * as RequestMetrics from "./RequestMetrics.ts";
+import * as Operations from "./Operations.node.ts";
+import * as Egress from "./Egress.node.ts";
+import * as StorageCapacity from "./StorageCapacity.node.ts";
 
 /**
  * A development asset server mounted before the Git routes.
@@ -65,6 +72,8 @@ export interface DevelopmentMiddleware {
 export interface ServeOptions extends Omit<ServeConfig, "port" | "hostname" | "hosts"> {
   /** Defaults to an ephemeral port; the return value carries the real one. */
   readonly port?: number;
+  /** Optional loopback-only operations listener; zero chooses an ephemeral port. */
+  readonly operationsPort?: number;
   readonly hostname?: string;
   /**
    * Public authorities this server answers to; see `ServeConfig.hosts`.
@@ -109,10 +118,17 @@ export interface ServeOptions extends Omit<ServeConfig, "port" | "hostname" | "h
    * commands at all should have been told to.
    */
   readonly wake?: boolean;
+  /** Exact origins explicitly permitted to reach private/loopback addresses. */
+  readonly egressPrivateOrigins?: ReadonlyArray<string>;
+  /** Explicit development opt-in; never implied by anonymous writes. */
+  readonly allowLoopbackEgress?: boolean;
 }
 
 export interface Server {
   readonly url: string;
+  /** Process-local counters; no public HTTP metrics route is exposed. */
+  readonly metrics: () => RequestMetrics.Snapshot;
+  readonly operationsUrl: string | undefined;
   /** Force closes active HTTP connections, for process-signal shutdown. */
   readonly close: (options?: { readonly force?: boolean }) => Promise<void>;
 }
@@ -157,6 +173,29 @@ const nodeHeaders = (headers: Headers): NodeHeaders => {
 };
 
 export const serve = async (options: ServeOptions): Promise<Server> => {
+  await StorageCapacity.verify(
+    options.repository ?? options.root,
+    await Effect.runPromise(StorageCapacity.ceiling),
+  );
+  const operationsPort = options.operationsPort ?? (await Effect.runPromise(Operations.port));
+  let operations: Awaited<ReturnType<typeof Operations.listen>> | undefined;
+  const metricsInterval = await Effect.runPromise(RequestMetrics.interval);
+  const metrics = RequestMetrics.make();
+  let metricsTimer: ReturnType<typeof setInterval> | undefined;
+  const admissionLimits = await Effect.runPromise(Admission.configuration());
+  const registryCapacity = await Effect.runPromise(RegistryCapacity.configuration("GIT"));
+  const admission = Admission.make(admissionLimits);
+  const budgets = await Effect.runPromise(RequestLimits.configuration());
+  const egress = Egress.make(
+    options.egressPrivateOrigins === undefined
+      ? await Effect.runPromise(Egress.configuration())
+      : Egress.origins(options.egressPrivateOrigins),
+    {
+      allowLoopback:
+        options.allowLoopbackEgress ?? (await Effect.runPromise(Egress.loopbackConfiguration)),
+    },
+  );
+  const requestLimits = Layer.succeed(RequestLimits.RequestLimits)(budgets);
   const hostname = options.hostname ?? "127.0.0.1";
   /** Only reached by a client that sent no `Host`, which HTTP/1.1 requires. */
   let fallbackAuthority = authorityOf(hostname, options.port ?? 0);
@@ -441,12 +480,18 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
   const openRepo = (repo: string): RepoState => {
     // The registry lives beside the repository it reports on, so a webhook
     // survives a restart the same way a ref does.
-    const subscribers = subscribersFile(path.join(repositoryDirectory(repo), "webhooks.json"));
+    const subscribers = subscribersFile(
+      path.join(repositoryDirectory(repo), "webhooks.json"),
+      registryCapacity,
+    );
 
     // And the remotes it fetches from, for the same reason and in the same
     // place: a remote that does not survive a restart is a URL somebody has
     // to remember.
-    const remotes = remotesFile(path.join(repositoryDirectory(repo), "remotes.json"));
+    const remotes = remotesFile(
+      path.join(repositoryDirectory(repo), "remotes.json"),
+      registryCapacity,
+    );
 
     // What happens after a push lands: deliver to whoever subscribed, forward
     // to whoever this repository is configured to send to, and — where the
@@ -462,6 +507,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       root: path.dirname(directory),
       repo: path.basename(directory),
       wake: options.wake === true,
+      transport: egress.fetch,
       background: (effect) => Effect.forkIn(effect, scope).pipe(Effect.asVoid),
     });
 
@@ -477,6 +523,8 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     // Built once while this repository has a request in flight, not once per
     // call; see `Router.handler`.
     const router = Router.handler({
+      transport: egress.fetch,
+      jsonBodyBytes: budgets.jsonBodyBytes,
       api: Api.layer(remotes, anchorSyntax),
       services: layer.pipe(
         Layer.provideMerge(lfsFile(path.join(repositoryDirectory(repo), "lfs"))),
@@ -485,7 +533,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       ),
       // The federation view and this machine's object budget are the
       // protocol's alone; the JSON API has never read either.
-      protocol: Layer.merge(federation, objectSize),
+      protocol: Layer.mergeAll(federation, objectSize, requestLimits),
     });
 
     return {
@@ -593,8 +641,28 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
   };
 
   let development: DevelopmentMiddleware | undefined;
+  const overloaded = (outgoing: http.ServerResponse) => {
+    outgoing.writeHead(503, { "retry-after": "1", connection: "close" });
+    outgoing.end("request capacity exhausted");
+  };
   const handleIncoming = (incoming: http.IncomingMessage, outgoing: http.ServerResponse): void => {
+    const lease = admission.acquire();
+    if (lease === null) {
+      metrics.refuse("global");
+      overloaded(outgoing);
+      return;
+    }
+    const completeMetrics = metrics.begin();
     const controller = new AbortController();
+    const deadline = setTimeout(() => {
+      metrics.deadline();
+      // Closing the transport stops slow input/output. A write already in its
+      // uninterruptible section keeps its gate and lease until it settles;
+      // timeout must not let another mutation race a still-running write.
+      controller.abort();
+      outgoing.destroy();
+    }, admissionLimits.deadlineMs);
+    deadline.unref();
     const disconnected = () => {
       if (!outgoing.writableFinished) controller.abort();
     };
@@ -639,6 +707,11 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
         return;
       }
       const repo = matched.repo;
+      if (!lease.enterRepository(repo)) {
+        metrics.refuse("repository");
+        overloaded(outgoing);
+        return;
+      }
       if (options.repository !== undefined && repo !== "repo") {
         outgoing.writeHead(404);
         outgoing.end("unknown repository");
@@ -704,8 +777,18 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
           // A repository whose identity cannot be read is not a repository
           // with no members: it is one nobody can be checked against, and the
           // honest answer is that the service is unavailable.
+          Effect.tapError(() =>
+            Effect.logError("authorization storage unavailable; request refused", {
+              component: "NodeHost",
+              operation: "authenticate",
+              event: "authorization_unavailable",
+            }),
+          ),
           Effect.orElseSucceed(() => ({
-            denied: new Response("authentication unavailable", { status: 503 }),
+            denied: new Response("authentication unavailable", {
+              status: 503,
+              headers: { "cache-control": "no-store" },
+            }),
             authenticated: Auth.anonymous,
           })),
         ),
@@ -728,33 +811,70 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
       if (denied.denied !== null) await deliver(denied.denied);
       else await dispatch(repo, request, deliver, denied.authenticated);
     })()
-      .catch((cause: unknown) => {
+      .catch(() => {
+        // Causes can embed credentials, request bodies, and private paths.
+        // Never append diagnostics to an already-started Git or LFS stream.
+        if (controller.signal.aborted) return;
+        console.error(
+          JSON.stringify({
+            component: "NodeHost",
+            operation: "request",
+            event: "request_failed",
+            responseStarted: outgoing.headersSent,
+          }),
+        );
         if (outgoing.destroyed) return;
-        if (!outgoing.headersSent) outgoing.writeHead(500);
-        outgoing.end(String(cause));
+        if (outgoing.headersSent) {
+          outgoing.destroy();
+          return;
+        }
+        outgoing.writeHead(500, {
+          "content-type": "text/plain; charset=utf-8",
+          "cache-control": "no-store",
+        });
+        outgoing.end("internal server error");
       })
-      .finally(() => outgoing.removeListener("close", disconnected));
+      .finally(async () => {
+        // Static/error responses use end() instead of pipeline(); they still
+        // occupy capacity until the response finishes or the socket closes.
+        await finished(outgoing, { cleanup: true }).catch(() => undefined);
+        clearTimeout(deadline);
+        outgoing.removeListener("close", disconnected);
+        lease.release();
+        completeMetrics(outgoing.writableFinished ? outgoing.statusCode : undefined);
+      });
   };
 
-  const server = http.createServer((incoming, outgoing) => {
-    if (development !== undefined && (incoming.method === "GET" || incoming.method === "HEAD")) {
-      development.handle(incoming, outgoing, (cause) => {
-        if (cause === undefined) {
-          handleIncoming(incoming, outgoing);
-        } else {
-          if (!outgoing.headersSent) outgoing.writeHead(500);
-          outgoing.end(cause instanceof Error ? cause.message : "development middleware failure");
-        }
-      });
-      return;
-    }
-    handleIncoming(incoming, outgoing);
-  });
+  const server = http.createServer(
+    {
+      requestTimeout: admissionLimits.deadlineMs,
+      headersTimeout: Math.min(admissionLimits.headersMs, admissionLimits.deadlineMs),
+      connectionsCheckingInterval: Math.min(1000, admissionLimits.headersMs),
+    },
+    (incoming, outgoing) => {
+      if (development !== undefined && (incoming.method === "GET" || incoming.method === "HEAD")) {
+        development.handle(incoming, outgoing, (cause) => {
+          if (cause === undefined) {
+            handleIncoming(incoming, outgoing);
+          } else {
+            if (!outgoing.headersSent) outgoing.writeHead(500);
+            outgoing.end(cause instanceof Error ? cause.message : "development middleware failure");
+          }
+        });
+        return;
+      }
+      handleIncoming(incoming, outgoing);
+    },
+  );
+  server.maxConnections = admissionLimits.connections;
+  server.setTimeout(admissionLimits.idleMs);
   const close = async (closeOptions?: { readonly force?: boolean }) => {
+    clearInterval(metricsTimer);
     const failures: unknown[] = [];
     // Each owner must release its resources even if another finalizer fails.
     // Middleware may hold watchers or sockets before the HTTP bind succeeds.
     for (const release of [
+      () => operations?.close(),
       () => development?.close(),
       () =>
         new Promise<void>((resolve, reject) => {
@@ -765,6 +885,7 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
           if (closeOptions?.force === true) server.closeAllConnections();
         }),
       () => Effect.runPromise(Scope.close(scope, Exit.void)),
+      () => egress.close(),
     ]) {
       try {
         await release();
@@ -777,6 +898,14 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
   };
   try {
     development = options.development === undefined ? undefined : await options.development(server);
+    if (operationsPort !== undefined) {
+      operations = await Operations.listen(
+        operationsPort,
+        options.repository ?? options.root,
+        metrics.snapshot,
+        admissionLimits.active,
+      );
+    }
 
     await new Promise<void>((resolve, reject) => {
       // Rejected on `error` as well as resolved on `listening`. A port already
@@ -821,7 +950,18 @@ export const serve = async (options: ServeOptions): Promise<Server> => {
     );
   }
 
+  if (metricsInterval > 0) {
+    metricsTimer = setInterval(() => {
+      console.error(
+        JSON.stringify({ component: "NodeHost", event: "request_metrics", ...metrics.snapshot() }),
+      );
+    }, metricsInterval);
+    metricsTimer.unref();
+  }
+
   return {
+    metrics: metrics.snapshot,
+    operationsUrl: operations?.url,
     url: `http://${authorityOf(hostname, bound)}`,
     close,
   };

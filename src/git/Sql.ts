@@ -12,3 +12,8 @@ export interface Sql {
     ...bindings: ReadonlyArray<string | number | null>
   ): { toArray(): Row[] };
 }
+
+/** Multi-statement mutations must commit or roll back as one synchronous unit. */
+export interface TransactionalSql extends Sql {
+  transactionSync<A>(body: () => A): A;
+}

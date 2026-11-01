@@ -26,9 +26,7 @@ export const layer = Layer.effect(
   }),
 );
 
-export class NotFound extends Schema.TaggedErrorClass<NotFound>()("UserRepo.NotFound", {
-  id: UserId,
-}) {}
+export class NotFound extends Schema.TaggedError<NotFound>()("UserRepo.NotFound", { id: UserId }) {}
 
 export * as UserRepo from "./user-repo.js";
 ```

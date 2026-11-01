@@ -75,7 +75,7 @@ const host = await serveHost({
     const vite = await createViteServer({
       configFile: join(root, "vite.config.ts"),
       root: ui,
-      server: { middlewareMode: { server } },
+      server: { middlewareMode: { server }, ws: { server } },
     });
     return {
       handle: (request, response, next) => {

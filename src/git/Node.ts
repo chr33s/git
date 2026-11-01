@@ -52,21 +52,116 @@ import {
 const failure = (operation: string, target: string) => (cause: unknown) =>
   new StorageFailure({ operation, path: target, cause });
 
-const writeAtomic = (target: string, contents: string) =>
+const syncDirectory = async (directory: string): Promise<void> => {
+  const handle = await fs.open(directory, "r");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+};
+
+// A failed creation can leave any ancestor present but unsynced. Repeat the
+// physical chain before acknowledging publication in a fresh process. Successful
+// chains establish which entries this process has synced; an error never
+// populates the cache. Recheck every ancestor's identity, even on a cache hit:
+// moving a parent need not change the identities of its descendants.
+// Include ctime as well as inode/device so removal/replacement invalidates an
+// entry, and bound the cache independently of repository/object count.
+const durableDirectories = new Map<string, string>();
+const syncDirectoryChain = async (directory: string): Promise<void> => {
+  let current = await fs.realpath(directory);
+  const completed: Array<readonly [string, string]> = [];
+  for (;;) {
+    const stat = await fs.stat(current, { bigint: true });
+    const identity = `${stat.dev}:${stat.ino}:${stat.birthtimeNs}:${stat.ctimeNs}`;
+    const durable = durableDirectories.get(current) === identity;
+    // Always sync the requested directory. For ancestors, unchanged identities
+    // reuse only a previously completed sync, never mere filesystem existence.
+    if (completed.length === 0 || !durable) await syncDirectory(current);
+    completed.push([current, identity]);
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  for (const [name, identity] of completed) {
+    durableDirectories.delete(name);
+    durableDirectories.set(name, identity);
+  }
+  while (durableDirectories.size > 4096) {
+    const oldest = durableDirectories.keys().next();
+    if (oldest.done) break;
+    durableDirectories.delete(oldest.value);
+  }
+};
+
+const prepareDirectory = async (directory: string): Promise<void> => {
+  const created = await fs.mkdir(directory, { recursive: true });
+  if (created === undefined) return;
+  const boundary = path.dirname(path.resolve(created));
+  let current = path.resolve(directory);
+  for (;;) {
+    await syncDirectory(current);
+    if (current === boundary) return;
+    const parent = path.dirname(current);
+    if (parent === current) return;
+    current = parent;
+  }
+};
+
+const replaceFile = async (
+  target: string,
+  contents: string | Uint8Array,
+  mode = 0o666,
+): Promise<void> => {
+  await prepareDirectory(path.dirname(target));
+  const temporary = `${target}.${crypto.randomUUID()}.tmp`;
+  try {
+    const handle = await fs.open(temporary, "wx", mode);
+    try {
+      await handle.writeFile(contents);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    // Readers see complete bytes; reserve() keeps writers out.
+    await fs.rename(temporary, target);
+    await syncDirectoryChain(path.dirname(target));
+  } finally {
+    await fs.rm(temporary, { force: true }).catch(() => undefined);
+  }
+};
+
+const writeAtomic = (target: string, contents: string | Uint8Array, mode = 0o666) =>
   Effect.tryPromise({
-    try: async () => {
-      await fs.mkdir(path.dirname(target), { recursive: true });
-      const temporary = `${target}.${crypto.randomUUID()}.tmp`;
-      try {
-        await fs.writeFile(temporary, contents);
-        // Readers see complete bytes; reserve() keeps writers out.
-        await fs.rename(temporary, target);
-      } finally {
-        await fs.rm(temporary, { force: true }).catch(() => undefined);
-      }
-    },
+    try: () => replaceFile(target, contents, mode),
     catch: failure("write", target),
-  });
+  }).pipe(
+    // Ref and unpack handlers may report failure inside HTTP 200. Emit the
+    // storage signal here before they translate it; paths and causes are private.
+    Effect.tapErrorTag("StorageFailure", () =>
+      Effect.logError("atomic storage write failed; inspect storage before retrying").pipe(
+        Effect.annotateLogs({
+          component: "git.Node",
+          operation: "write",
+          event: "storage_failure",
+        }),
+      ),
+    ),
+    Effect.uninterruptible,
+  );
+
+const removeFile = async (target: string): Promise<void> => {
+  await fs.rm(target, { force: true });
+  try {
+    // Retry this even when the file was already absent: a previous unlink may
+    // have succeeded before its directory sync failed.
+    await syncDirectoryChain(path.dirname(target));
+  } catch (cause) {
+    if (cause instanceof Error && "code" in cause && cause.code === "ENOENT") return;
+    throw cause;
+  }
+};
 
 // Stock Git also reserves <ref>.lock. Keep that reservation while the
 // separate temporary file is renamed, so batch rollback and reflog
@@ -75,7 +170,7 @@ const reserve = (target: string) =>
   Effect.acquireRelease(
     Effect.tryPromise({
       try: async () => {
-        await fs.mkdir(path.dirname(target), { recursive: true });
+        await prepareDirectory(path.dirname(target));
         const lock = `${target}.lock`;
         const handle = await fs.open(lock, "wx");
         try {
@@ -103,8 +198,10 @@ export const initializeBare = Effect.fn("Node.initializeBare")(
     yield* checkHeadTarget(head);
     yield* Effect.tryPromise({
       try: async () => {
-        await fs.mkdir(path.join(root, "objects"), { recursive: true });
-        await fs.mkdir(path.join(root, "refs"), { recursive: true });
+        await prepareDirectory(path.join(root, "objects"));
+        await syncDirectoryChain(path.join(root, "objects"));
+        await prepareDirectory(path.join(root, "refs"));
+        await syncDirectoryChain(path.join(root, "refs"));
       },
       catch: failure("initialize", root),
     });
@@ -368,19 +465,24 @@ export const objectStore = (root: string) =>
             const oid = yield* hashObject(object);
             const target = pathFor(oid);
 
-            // Already there: objects are content-addressed, so a rewrite would
-            // be identical bytes and only costs IO.
-            if (existsSync(target)) return oid;
-
-            yield* Effect.tryPromise({
-              try: async () => {
-                await fs.mkdir(path.dirname(target), { recursive: true });
-                const temporary = `${target}.${crypto.randomUUID()}.tmp`;
-                await fs.writeFile(temporary, deflateSync(encodeObject(object)));
-                await fs.rename(temporary, target);
-              },
-              catch: failure("write", target),
-            });
+            // A previous attempt may have renamed the object and then failed
+            // its directory sync. Existence alone cannot acknowledge a retry.
+            if (existsSync(target)) {
+              yield* Effect.tryPromise({
+                try: async () => {
+                  const handle = await fs.open(target, "r");
+                  try {
+                    await handle.sync();
+                  } finally {
+                    await handle.close();
+                  }
+                  await syncDirectoryChain(path.dirname(target));
+                },
+                catch: failure("write", target),
+              }).pipe(Effect.uninterruptible);
+            } else {
+              yield* writeAtomic(target, deflateSync(encodeObject(object)));
+            }
 
             return oid;
           }),
@@ -390,9 +492,9 @@ export const objectStore = (root: string) =>
           !named(oid)
             ? Effect.void
             : Effect.tryPromise({
-                try: () => fs.rm(pathFor(oid), { force: true }),
+                try: () => removeFile(pathFor(oid)),
                 catch: failure("delete", pathFor(oid)),
-              }),
+              }).pipe(Effect.uninterruptible),
 
         /**
          * What this repository lends and borrows.
@@ -1062,6 +1164,13 @@ export const filePacks = (root: string): PackStore["Service"] => {
         if (cached !== undefined && cached.stamp === stamp) return cached.handles;
         const handles = await readHandles(directories);
         cache.set(key, { handles, stamp });
+        // Local and borrowed listings alternate on the read path. Retain both,
+        // but not indexes from every historical alternates configuration.
+        if (key !== directory) {
+          for (const previous of cache.keys()) {
+            if (previous !== directory && previous !== key) cache.delete(previous);
+          }
+        }
         return handles;
       },
       catch: failure("packs.list", directory),
@@ -1137,17 +1246,13 @@ export const filePacks = (root: string): PackStore["Service"] => {
     ),
 
     write: ({ index, name, pack }) =>
-      Effect.tryPromise({
-        try: async () => {
-          await fs.mkdir(directory, { recursive: true });
-          // The pack lands before the index that points into it: an index
-          // without a pack is skipped above, but a pack without an index is
-          // simply not consulted, and neither state loses an object.
-          await fs.writeFile(path.join(directory, `${name}.pack`), pack);
-          await fs.writeFile(path.join(directory, `${name}.idx`), index);
-        },
-        catch: failure("packs.write", directory),
-      }),
+      Effect.gen(function* () {
+        // Publish synced data before the index that makes it discoverable.
+        // Never truncate a final file: a failed rewrite must preserve the pack
+        // and index that acknowledged refs may already depend on.
+        yield* writeAtomic(path.join(directory, `${name}.pack`), pack);
+        yield* writeAtomic(path.join(directory, `${name}.idx`), index);
+      }).pipe(Effect.mapError(failure("packs.write", directory)), Effect.uninterruptible),
 
     delete: (name) =>
       Effect.tryPromise({
@@ -1168,16 +1273,14 @@ export const filePacks = (root: string): PackStore["Service"] => {
           const packPath = path.join(directory, `${name}.pack`);
           await retiringRemove(
             () => retirePack(packPath),
-            () => fs.rm(packPath, { force: true }),
+            () => removeFile(packPath),
           );
-          // Forgiven, deliberately: with the pack gone this index names
-          // nothing, every listing skips it, and failing here would fail a
-          // `gc` that has already written its new pack — leaving the objects
-          // it superseded behind for the sake of a file that costs kilobytes.
-          await fs.rm(path.join(directory, `${name}.idx`), { force: true }).catch(() => undefined);
+          // Report incomplete cleanup so maintenance can be retried; do not
+          // acknowledge a deletion whose directory update could not be synced.
+          await removeFile(path.join(directory, `${name}.idx`));
         },
         catch: failure("packs.delete", directory),
-      }),
+      }).pipe(Effect.uninterruptible),
   };
 };
 
@@ -1194,6 +1297,21 @@ export const refStore = (root: string, worktreeRoot = root) =>
     Effect.sync(() => {
       const pathFor = (name: string) => path.join(name === "HEAD" ? worktreeRoot : root, name);
       const headPath = path.join(worktreeRoot, "HEAD");
+      const transactionPath = path.join(root, ".git-plus-ref-transaction.json");
+      const noPendingTransaction = Effect.tryPromise({
+        try: async () => {
+          try {
+            await fs.lstat(transactionPath);
+          } catch (cause) {
+            if (cause instanceof Error && "code" in cause && cause.code === "ENOENT") return;
+            throw cause;
+          }
+          throw new Error(
+            "unfinished ref transaction; preserve the journal and recover before continuing",
+          );
+        },
+        catch: failure("ref.transaction", transactionPath),
+      });
 
       const readFile = (target: string) =>
         Effect.tryPromise({
@@ -1336,13 +1454,11 @@ export const refStore = (root: string, worktreeRoot = root) =>
         }
 
         if (kept.length === lines.filter((line) => line.length > 0).length) return;
-        const temporary = `${target}.${crypto.randomUUID()}.tmp`;
         try {
-          await fs.writeFile(temporary, kept.length === 0 ? "" : `${kept.join("\n")}\n`);
-          await fs.rename(temporary, target);
-          forgetPackedRefs();
+          await replaceFile(target, kept.length === 0 ? "" : `${kept.join("\n")}\n`);
         } finally {
-          await fs.rm(temporary, { force: true }).catch(() => undefined);
+          // A post-rename sync failure can still have changed the file.
+          forgetPackedRefs();
         }
       };
 
@@ -1358,7 +1474,7 @@ export const refStore = (root: string, worktreeRoot = root) =>
               "logs",
               update.name,
             );
-            await fs.mkdir(path.dirname(target), { recursive: true });
+            await prepareDirectory(path.dirname(target));
             const line = encodeReflogLine({
               from,
               to: update.value,
@@ -1371,7 +1487,14 @@ export const refStore = (root: string, worktreeRoot = root) =>
             // turn its history into an unbounded file.
             const size = existsSync(target) ? (await fs.stat(target)).size : 0;
             if (size < REFLOG_MAX_BYTES) {
-              await fs.appendFile(target, line);
+              const handle = await fs.open(target, "a");
+              try {
+                await handle.writeFile(line);
+                await handle.sync();
+              } finally {
+                await handle.close();
+              }
+              await syncDirectoryChain(path.dirname(target));
               return;
             }
 
@@ -1384,11 +1507,9 @@ export const refStore = (root: string, worktreeRoot = root) =>
             // From the first whole entry in the tail: a slice at a byte offset
             // can land inside a line, or inside a character.
             const start = tail.indexOf(0x0a) + 1;
-            const temporary = `${target}.${crypto.randomUUID()}.tmp`;
-            await fs.writeFile(temporary, Buffer.concat([tail.subarray(start), Buffer.from(line)]));
             // Renamed rather than written in place: a crash mid-rewrite would
             // otherwise leave the log truncated at whatever landed.
-            await fs.rename(temporary, target);
+            await replaceFile(target, Buffer.concat([tail.subarray(start), Buffer.from(line)]));
           },
           catch: failure("reflog", update.name),
         });
@@ -1401,10 +1522,12 @@ export const refStore = (root: string, worktreeRoot = root) =>
           // Before any name is joined onto `root`: `pathFor` would happily
           // resolve `refs/../../etc/passwd` outside the repository.
           yield* checkRefNames(updates);
+          yield* noPendingTransaction;
 
           const at = new Date();
           const results: RefUpdateResult[] = [];
-          const pending: Array<{ from: Oid | null; update: RefUpdate }> = [];
+          const pending: Array<{ from: Oid | null; rawFrom: string | null; update: RefUpdate }> =
+            [];
 
           const locked = new Set<string>();
           for (const name of [...new Set(updates.map((update) => update.name))].sort()) {
@@ -1432,7 +1555,8 @@ export const refStore = (root: string, worktreeRoot = root) =>
           // Check everything first: an atomic batch that fails must not have
           // written anything, and rename(2) cannot be undone.
           for (const update of updates) {
-            const actual = yield* read(update.name);
+            const rawFrom = yield* readRaw(update.name);
+            const actual = rawFrom !== null && isOid(rawFrom) ? rawFrom : null;
             if (!locked.has(update.name) || !packedReady) {
               results.push({
                 name: update.name,
@@ -1448,7 +1572,7 @@ export const refStore = (root: string, worktreeRoot = root) =>
               applied: matches,
               current: matches ? update.value : actual,
             });
-            if (matches) pending.push({ from: actual, update });
+            if (matches) pending.push({ from: actual, rawFrom, update });
           }
 
           if (options?.atomic === true && results.some((result) => !result.applied)) {
@@ -1459,6 +1583,51 @@ export const refStore = (root: string, worktreeRoot = root) =>
             );
           }
 
+          // Take the journal reservation only after the ref reservations and
+          // comparisons. Holding it while acquiring individual refs would
+          // unnecessarily exclude unrelated work before this batch is ready.
+          const journaled = options?.atomic === true && pending.length > 1;
+          const available =
+            !journaled ||
+            (yield* reserve(transactionPath).pipe(
+              Effect.as(true),
+              Effect.catchTag("StorageFailure", () => Effect.succeed(false)),
+            ));
+          if (!available) {
+            return yield* Effect.forEach(updates, (update) =>
+              read(update.name).pipe(
+                Effect.map((current) => ({
+                  name: update.name,
+                  applied: false,
+                  current,
+                  reason: "cannot lock ref",
+                })),
+              ),
+            );
+          }
+          yield* noPendingTransaction;
+          if (journaled) {
+            yield* writeAtomic(
+              transactionPath,
+              `${JSON.stringify({
+                version: 1,
+                worktree: path.resolve(worktreeRoot),
+                updates: pending.map(({ rawFrom, update }) => ({
+                  name: update.name,
+                  from: rawFrom,
+                  to: update.value,
+                })),
+              })}\n`,
+              0o600,
+            );
+          }
+          const finishTransaction = journaled
+            ? Effect.tryPromise({
+                try: () => removeFile(transactionPath),
+                catch: failure("ref.transaction.complete", transactionPath),
+              })
+            : Effect.void;
+
           /** One update, as a ref write: `null` deletes. */
           const put = (name: string, value: Oid | null) =>
             value === null
@@ -1468,16 +1637,17 @@ export const refStore = (root: string, worktreeRoot = root) =>
                     // entry is gone. A failed rewrite must not expose that old
                     // value while reporting the deletion as unapplied.
                     await removePacked(name);
-                    await fs.rm(pathFor(name), { force: true });
+                    await removeFile(pathFor(name));
                   },
                   catch: failure("delete", pathFor(name)),
                 })
               : writeAtomic(pathFor(name), `${value}\n`);
 
           /** What has been written, newest last, for an atomic undo. */
-          const done: Array<{ from: Oid | null; update: RefUpdate }> = [];
+          const done: typeof pending = [];
 
-          for (const { from, update } of pending) {
+          for (const entry of pending) {
+            const { update } = entry;
             const written = yield* put(update.name, update.value).pipe(
               Effect.as(true),
               // One ref that cannot be written — `refs/heads/x` where
@@ -1488,13 +1658,35 @@ export const refStore = (root: string, worktreeRoot = root) =>
 
             if (!written) {
               // `atomic` is a promise about the batch, not about this ref.
-              // rename(2) cannot be undone, so the refs already moved are
-              // put back where they were and the whole batch reports as
-              // unapplied — which is what the caller asked for.
+              // A failed deletion may already have changed packed-refs. Try
+              // restoring that update too, then every earlier write even if
+              // one restoration fails. Only a successful rollback permits an
+              // ordinary all-unapplied result.
               if (options?.atomic === true) {
-                for (const undo of done.reverse()) {
-                  yield* put(undo.update.name, undo.from).pipe(Effect.ignore);
+                const failures: StorageFailure[] = [];
+                for (const undo of [...done, entry].reverse()) {
+                  yield* Effect.gen(function* () {
+                    if ((yield* readRaw(undo.update.name)) !== undo.rawFrom) {
+                      yield* undo.rawFrom === null
+                        ? put(undo.update.name, null)
+                        : writeAtomic(pathFor(undo.update.name), `${undo.rawFrom}\n`);
+                    }
+                  }).pipe(
+                    Effect.catchTag("StorageFailure", (error) =>
+                      Effect.sync(() => {
+                        failures.push(error);
+                      }),
+                    ),
+                  );
                 }
+                if (failures.length > 0) {
+                  return yield* new StorageFailure({
+                    operation: "rollback",
+                    path: root,
+                    cause: failures,
+                  });
+                }
+                yield* finishTransaction;
                 return yield* Effect.forEach(results, (result) =>
                   read(result.name).pipe(
                     Effect.map((current) => ({
@@ -1521,7 +1713,7 @@ export const refStore = (root: string, worktreeRoot = root) =>
               continue;
             }
 
-            done.push({ from, update });
+            done.push(entry);
           }
 
           // Once every write in the batch has landed, not as each one does.
@@ -1536,8 +1728,16 @@ export const refStore = (root: string, worktreeRoot = root) =>
           // would report a ref as untouched while it sits at its new
           // value. `fsck` is where an unwritable `logs/` is diagnosed.
           for (const { from, update } of done) {
-            yield* appendReflog(update, from, at).pipe(Effect.ignore);
+            yield* appendReflog(update, from, at).pipe(
+              Effect.catchTag("StorageFailure", () =>
+                Effect.logWarning("reflog persistence failed; the ref update remains applied").pipe(
+                  Effect.annotateLogs({ component: "git.Node", operation: "reflog" }),
+                ),
+              ),
+            );
           }
+
+          yield* finishTransaction;
 
           return results;
         }).pipe(Effect.scoped, Effect.uninterruptible);
@@ -1550,23 +1750,28 @@ export const refStore = (root: string, worktreeRoot = root) =>
           updateShallow: ({ add, remove }) =>
             Effect.gen(function* () {
               if (add.length === 0 && remove.length === 0) return;
+              yield* noPendingTransaction;
               const target = path.join(root, "shallow");
               yield* reserve(target);
+              yield* noPendingTransaction;
               const current = new Set(((yield* readFile(target)) ?? "").split(/\s+/).filter(isOid));
               for (const oid of remove) current.delete(oid);
               for (const oid of add) current.add(oid);
               if (current.size === 0) {
                 yield* Effect.tryPromise({
-                  try: () => fs.rm(target, { force: true }),
+                  try: async () => {
+                    await removeFile(target);
+                  },
                   catch: failure("write", target),
                 });
               } else {
                 yield* writeAtomic(target, `${[...current].sort().join("\n")}\n`);
               }
             }).pipe(Effect.scoped, Effect.uninterruptible),
-          read,
+          read: (name) => Effect.andThen(noPendingTransaction, read(name)),
           resolve: (name) =>
             Effect.gen(function* () {
+              yield* noPendingTransaction;
               let current = name;
               // Bounded, because a `ref:` chain on disk can be a cycle — git
               // gives up after five; the extra hops cost nothing.
@@ -1598,6 +1803,7 @@ export const refStore = (root: string, worktreeRoot = root) =>
             }),
           list: (prefix) =>
             Effect.gen(function* () {
+              yield* noPendingTransaction;
               // Packed first, loose over the top: a loose ref is the newer of
               // the two whenever both exist, exactly as git resolves it.
               const found = new Map<string, Oid>(yield* packedRefs);
@@ -1662,11 +1868,13 @@ export const refStore = (root: string, worktreeRoot = root) =>
                     ),
               ),
             ),
-          head,
+          head: Effect.andThen(noPendingTransaction, head),
           setHead: (target) =>
             Effect.gen(function* () {
               yield* checkHeadTarget(target);
+              yield* noPendingTransaction;
               yield* reserve(headPath);
+              yield* noPendingTransaction;
               yield* writeAtomic(headPath, `ref: ${target}\n`);
             }).pipe(Effect.scoped, Effect.uninterruptible),
           reflog: (name) =>

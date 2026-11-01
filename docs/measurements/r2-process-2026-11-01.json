@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-01",
+  "kind": "native-r2-namespace-coordinator-process-death",
+  "sourceSha256": {
+    "src/testing/BackupBucketBridge.ts": "0deb5ef33da516b056d9ffe9e2d9dd29783ed008d769e4330bf8a4ad0e5217c7",
+    "src/testing/BackupProcess.ts": "f9553923235f995ba87a2e2ea6a308bd0cf023c3cd5814ef1702f567929d1a67",
+    "src/testing/BackupRuntime.ts": "0ff1a2ec0c102a3f18f4f97d5eadebbe22823b0240208c5a535f32ad90dfbf7a",
+    "src/testing/BackupCodec.worker.ts": "ba4af3ff4b217a05caa0014a60bfc8e5fc5d86a1eee118d167c740c282e305c2",
+    "src/host/TargetRecovery.process.test.ts": "729267db92cc048d9c1a631d1e30056f555b658f78168cdb592c28c73a9f5fea",
+    "src/host/SourceRelease.process.test.ts": "0c4c74a3bc78bff4afe2c377f73d2d24d9bda3106bd825d5bb571cf268eb8fcd",
+    "src/miniflare.test.ts": "57e94f5b11c29905c1d537d486a1476eb651060efccc86483e205d4c0fd351c9",
+    "patches/miniflare+5.20261023.2-beta.patch": "f6c94adb3e296e9a6974a10ab5661508ec9762bb6599e5ab1517ddd8a2c17e71"
+  },
+  "tests": {
+    "node26.10.0": {
+      "files": 3,
+      "passed": 14,
+      "skipped": 0,
+      "unhandledErrors": 0,
+      "strictReporter": true,
+      "logSha256": "aadc7f3ead456055c34b0c41b83e139d277fff1b049f75f5fdc5f686b5629c46"
+    },
+    "node24.12.0": {
+      "files": 4,
+      "passed": 16,
+      "skipped": 0,
+      "unhandledErrors": 0,
+      "strictReporter": true,
+      "logSha256": "e099c65e1c6059d3f4dc303929cab00e47eb80980fb5628c4bac2db4422bec12"
+    }
+  },
+  "repositoryCheck": {
+    "exitCode": 0,
+    "logSha256": "90c9ee23bfea98e430d21fe65aa1902500a2448964924cbb40512f24cac15e86"
+  },
+  "nativeFixture": {
+    "targetObjects": 2,
+    "r2Objects": 1,
+    "r2Bytes": 1048576,
+    "r2Metadata": ["contentType", "cacheControl", "customMetadata"],
+    "storageSurvivesChild": true,
+    "bodyTransport": "streaming HTTP plus native FixedLengthStream",
+    "targetCrashScenarios": 9,
+    "newBoundaries": [
+      "SIGKILL during streamed PUT",
+      "SIGKILL after native PUT commit before child acknowledgement"
+    ]
+  },
+  "verified": [
+    "Incomplete upload leaves no destination key",
+    "Committed but unacknowledged object survives; retry retains its native version",
+    "Resumed SQL, typed/cyclic KV and R2 bytes and metadata match source while held",
+    "Journal integrity and expected phase/receipts after process death",
+    "DO eviction followed by fresh coordinator process resumes recovery",
+    "Separate release keeps sources held and retries preserve newer target holds without remote requests"
+  ],
+  "dependencyPatch": {
+    "package": "miniflare",
+    "version": "5.20261023.2-beta",
+    "failure": "prefixStream aborts detached writer after body pipe failure, yielding unhandled ERR_INVALID_STATE",
+    "fix": "Abort through current writer while locked, otherwise through writable stream",
+    "regressions": "Prefix accepted then upload error; cancellation before prefix accepted; native interrupted PUT",
+    "reverseApplyCheck": true
+  },
+  "limitations": [
+    "Local workerd and native R2 emulator only; no deployed Cloudflare account",
+    "Native storage remains live while coordinator dies; not platform power-loss proof",
+    "One 1 MiB object; not maximum object size or production throughput/RPO/RTO",
+    "Global writer/deployment isolation and production custody/retention remain external",
+    "Capture interruption still requires a new archive and fresh destination; no capture resume added"
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-30",
+  "kind": "durable-namespace-restore",
+  "sourceSha256": {
+    "tools/cloudflare-namespace-restore.ts": "d9ab3ab6ca6931eb80aa412ff82267af9a462b31d1eca688297a24b69c903fd2",
+    "tools/cloudflare-namespace-archive.ts": "081fa699f4ef754c9dc79dae8b31df44a52731cf8285dbf46cf0dc158ae8169b",
+    "tools/cloudflare-object-archive.ts": "488b70c4f0702ccc5c08b4ff01ebe061b838a7a45aa5f198351e2821fc833bb4",
+    "tools/copy-r2-backup.ts": "0d212829553c891b34242269091fe5b23707f633156101d700c8ddda3888eb6f",
+    "src/host/BackupCodec.test.ts": "8d5f55796fe3205f5fd8e56cceb51645b6a769e983cd8b180f504add2df57368"
+  },
+  "tests": {
+    "node24.12.0": {
+      "files": 3,
+      "passed": 22,
+      "logSha256": "60d3217a3d93adf22f349262ffea3e974ef8b487958f4d2a7feeae93695d27f4"
+    },
+    "node26.10.0": {
+      "files": 3,
+      "passed": 22,
+      "logSha256": "cbe325ae7e8efb49dc12a4a5bebd9300f8d65dd98ad7990c0780fde87a1e2980"
+    }
+  },
+  "repositoryCheck": {
+    "passed": true,
+    "logSha256": "8e1b25d68dc73df610f04e96ea13744d6967c3f488eb758cbdee07dd4c91c83a"
+  },
+  "coverage": [
+    "Duplicate target mappings fail before RPC; mapping initialization is atomic.",
+    "Concurrent coordinator using the same journal is rejected before RPC by native SQLite locking.",
+    "Failed second hold prevents R2 writes and preserves the first target fence.",
+    "Lost successful Apply acknowledgement leaves one durable object completion receipt and a resumable second object checkpoint.",
+    "Changed mapping or target identity is rejected before RPC without modifying saved receipts.",
+    "Evicted targets resume; completed retry preserves R2 object versions and both object fences.",
+    "Application, LFS, registry and authorization state matches the source after restored object eviction.",
+    "Journal directory/file modes are 0700/0600; final phase is ready with two persisted receipts."
+  ],
+  "limits": [
+    "Caller must isolate all writers and bind actual clients/buckets to declared target identity.",
+    "Ready means import completion only; no automatic checkpoint retirement or fence release.",
+    "Different journal directories do not share a coordinator lock.",
+    "Process-kill, power-loss and network filesystem durability have not been qualified.",
+    "Production Cloudflare deployment, recovery targets, multipart R2 transfer and durable release coordination remain open."
+  ]
+}

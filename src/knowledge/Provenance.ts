@@ -1,6 +1,11 @@
 /** Accepted immutable session-record support, shared by citations and recall. */
 import { Effect } from "effect";
-import type { Invalid, ObjectNotFound, StorageFailure } from "../git/Error.ts";
+import type {
+  Invalid,
+  ObjectNotFound,
+  RequestLimitExceeded,
+  StorageFailure,
+} from "../git/Error.ts";
 import { qualify, unqualify } from "../git/Oid.ts";
 import { Repository } from "../git/Repository.ts";
 import { isOid, type Oid } from "../git/Store.ts";
@@ -103,7 +108,11 @@ const heldOf = Effect.fn("knowledge.Provenance.heldOf")(function* (session: stri
 export const evaluate = Effect.fn("knowledge.Provenance.checkCitation")(function* (
   reference: string,
   judge: Judge,
-): Effect.fn.Return<Citation, Invalid | ObjectNotFound | StorageFailure, Repository> {
+): Effect.fn.Return<
+  Citation,
+  Invalid | ObjectNotFound | RequestLimitExceeded | StorageFailure,
+  Repository
+> {
   const repository = yield* Repository;
   const oid = unqualify(reference);
   if (oid === null) {

@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "measuredAt": "2026-10-30T04:35:18.655Z",
+  "node": "v26.10.0",
+  "platform": "darwin",
+  "arch": "arm64",
+  "kernel": "27.0.0",
+  "cpu": "Apple M5 Max",
+  "revision": "54c6199b79d3b121ad7964ac8d0edaeba85b4666",
+  "dirty": true,
+  "filesystemType": 26,
+  "limits": {
+    "bytes": 10737418240,
+    "objects": 100000
+  },
+  "uploadBytes": 1048576,
+  "rounds": 3,
+  "measurements": [
+    {
+      "retainedObjects": 1000,
+      "retainedPayloadBytes": 24890,
+      "seedMs": 72.71991700000001,
+      "durationsMs": [146.80429199999998, 129.09887500000002, 127.02054200000003],
+      "rssBeforeBytes": 153747456,
+      "sampledPeakRssBytes": 205635584,
+      "rssAfterBytes": 205668352,
+      "userCpuMicroseconds": 139422,
+      "systemCpuMicroseconds": 170700,
+      "eventLoopDelayMaxMs": 22.462463,
+      "eventLoopDelayP99Ms": 22.462463
+    },
+    {
+      "retainedObjects": 10000,
+      "retainedPayloadBytes": 258890,
+      "seedMs": 505.51920900000005,
+      "durationsMs": [781.0956249999999, 691.0161669999998, 658.7905000000001],
+      "rssBeforeBytes": 207372288,
+      "sampledPeakRssBytes": 239960064,
+      "rssAfterBytes": 239976448,
+      "userCpuMicroseconds": 792416,
+      "systemCpuMicroseconds": 1424037,
+      "eventLoopDelayMaxMs": 21.790719,
+      "eventLoopDelayP99Ms": 21.037055
+    },
+    {
+      "retainedObjects": 99999,
+      "retainedPayloadBytes": 2688863,
+      "seedMs": 4910.2771250000005,
+      "durationsMs": [4384.664292, 4877.239958999999, 4275.750916999998],
+      "rssBeforeBytes": 246677504,
+      "sampledPeakRssBytes": 269533184,
+      "rssAfterBytes": 198901760,
+      "userCpuMicroseconds": 4706823,
+      "systemCpuMicroseconds": 9437116,
+      "eventLoopDelayMaxMs": 21.364735,
+      "eventLoopDelayP99Ms": 20.037631
+    }
+  ],
+  "quotaRefusalVerified": true,
+  "uploadDigestVerified": true,
+  "quotaLocksCleaned": true,
+  "limitsOfEvidence": "Local source backend, warm filesystem cache, tiny retained objects. RSS includes fixture seeding; upload timings include scan, durable publication and streamed digest verification. Not HTTP concurrency, R2, cold-cache or production-volume qualification."
+}
