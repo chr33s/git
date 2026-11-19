@@ -4,8 +4,15 @@ name: Release
 # platform for a version tag, packages and verifies it with the same tools CI
 # uses, attests the archives and attaches them to a *draft* GitHub Release.
 # Publishing the draft is a manual step, taken once CI on the same tag is green.
-# The npm package is then published with trusted publishing (OIDC) behind the
-# `npm` environment.
+# The npm package is packed once; that tarball is attached to the release and
+# is the exact file published with trusted publishing (OIDC) behind the `npm`
+# environment.
+#
+# Release assets, per version:
+#   git-plus-<version>-<target>.tar.gz(.sha256)  archive: binary, licenses, notices
+#   git+-<target>, git+-<target>.sha             the bare executable
+#   chr33s-git-<version>.tgz, ….tgz.sha          the npm package
+#   SHA256SUMS                                   every checksum above
 
 on:
   push:
@@ -132,18 +139,73 @@ jobs:
           (cd "${installed[0]}" && shasum -a 256 -c CONTENTS.sha256)
           "${installed[0]}/git+" --version
           "${installed[0]}/git+" --build-info
+      # The same verified executable, uncompressed, for a direct download.
+      - name: Stage the bare executable
+        working-directory: dist/releases
+        run: |
+          name="git+-${{ matrix.target }}"
+          cp ../sea/git+ "$name"
+          chmod 0755 "$name"
+          shasum -a 256 "$name" > "$name.sha"
+          shasum -a 256 -c "$name.sha"
+      # The exact shipped archive, installed into a fresh Debian with no Node
+      # or source, and exercised end to end.
+      - name: Verify Linux archive in a clean container
+        if: runner.os == 'Linux'
+        run: |
+          archives=(dist/releases/git-plus-*-${{ matrix.target }}.tar.gz)
+          bash tools/verify-standalone-container.sh "${archives[0]}" "$RUNNER_TEMP/release-installation-${{ matrix.target }}.json"
       - uses: actions/upload-artifact@v6
         with:
           name: release-${{ matrix.target }}
           path: |
             dist/releases/*.tar.gz
             dist/releases/*.tar.gz.sha256
+            dist/releases/git+-${{ matrix.target }}
+            dist/releases/git+-${{ matrix.target }}.sha
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v6
+        if: runner.os == 'Linux'
+        with:
+          name: installation-${{ matrix.target }}
+          path: ${{ runner.temp }}/release-installation-${{ matrix.target }}.json
+          if-no-files-found: error
+          retention-days: 30
+
+  pack:
+    name: Pack npm package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      # `prepack` builds dist/lib and dist/bin (with the UI and notices).
+      - name: Pack
+        run: |
+          mkdir -p dist/package
+          npm pack --pack-destination dist/package
+          version="$(node -p 'require("./package.json").version')"
+          tarball="chr33s-git-$version.tgz"
+          test "$(ls dist/package)" = "$tarball"
+          (cd dist/package && sha256sum "$tarball" > "$tarball.sha" && sha256sum -c "$tarball.sha")
+      - uses: actions/upload-artifact@v6
+        with:
+          name: package
+          path: |
+            dist/package/*.tgz
+            dist/package/*.tgz.sha
           if-no-files-found: error
           retention-days: 7
 
   github:
     name: Draft GitHub Release
-    needs: build
+    needs: [build, pack]
     if: github.repository == 'chr33s/git'
     runs-on: ubuntu-latest
     permissions:
@@ -159,6 +221,10 @@ jobs:
           pattern: release-*
           path: dist/releases
           merge-multiple: true
+      - uses: actions/download-artifact@v6
+        with:
+          name: package
+          path: dist/releases
       - name: Verify downloaded archives
         working-directory: dist/releases
         run: |
@@ -167,19 +233,50 @@ jobs:
           test "$tag" = "v$version"
           for target in linux-x64 linux-arm64 darwin-arm64 darwin-x64; do
             test -f "git-plus-$version-$target.tar.gz"
+            test -f "git+-$target"
           done
-          sha256sum -c ./*.sha256
-          cat ./*.sha256 > SHA256SUMS
+          test -f "chr33s-git-$version.tgz"
+          sha256sum -c ./*.sha256 ./*.sha
+          cat ./*.sha256 ./*.sha > SHA256SUMS
       - name: Attest archives
+        id: provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
-          subject-path: dist/releases/*.tar.gz
+          subject-path: |
+            dist/releases/*.tar.gz
+            dist/releases/*.tgz
+            dist/releases/git+-linux-x64
+            dist/releases/git+-linux-arm64
+            dist/releases/git+-darwin-arm64
+            dist/releases/git+-darwin-x64
+      - name: Verify provenance before release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        # The attestation names the run's own ref and commits: the tag on a
+        # tag push, the dispatching branch on a manual re-run.
+        run: |
+          for archive in dist/releases/*.tar.gz dist/releases/*.tgz \
+            dist/releases/git+-{linux-x64,linux-arm64,darwin-arm64,darwin-x64}; do
+            gh attestation verify "$archive" \
+              --bundle "$BUNDLE" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-digest "$GITHUB_SHA" \
+              --signer-digest "$GITHUB_WORKFLOW_SHA" \
+              --source-ref "$GITHUB_REF" \
+              --deny-self-hosted-runners
+          done
       - name: Create or update the draft release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          files=(dist/releases/*.tar.gz dist/releases/*.tar.gz.sha256 dist/releases/SHA256SUMS)
+          files=(
+            dist/releases/*.tar.gz dist/releases/*.tar.gz.sha256
+            dist/releases/git+-* dist/releases/*.tgz dist/releases/*.tgz.sha
+            dist/releases/SHA256SUMS
+          )
           if draft="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null)"; then
             # Never replace assets on a release people may already have downloaded.
             test "$draft" = "true" || { echo "::error::$TAG is already published"; exit 1; }
@@ -192,15 +289,9 @@ jobs:
               --generate-notes
           fi
 
-  # npm trusted publishing: npm exchanges this job's OIDC token for a
-  # short-lived publish credential, so no NPM_TOKEN secret exists, and attaches
-  # provenance on its own. The package's trusted publisher on npmjs.com must
-  # name this repository, `release.yml` and the `npm` environment; give that
-  # environment required reviewers to hold the publish until CI on the tag is
-  # green, the same gate the draft GitHub Release has.
   npm:
     name: Publish to npm
-    needs: [build, github]
+    needs: [build, pack, github]
     if: github.repository == 'chr33s/git'
     runs-on: ubuntu-latest
     environment: npm
@@ -215,9 +306,15 @@ jobs:
         with:
           # Trusted publishing needs npm >= 11.5.1, which Node 26 ships.
           node-version: 26
-          cache: npm
           registry-url: https://registry.npmjs.org
-      - run: npm ci
+      # The tarball the release carries, so npm serves the same bytes.
+      - uses: actions/download-artifact@v6
+        with:
+          name: package
+          path: dist/package
+      - name: Verify package checksum
+        working-directory: dist/package
+        run: sha256sum -c ./*.tgz.sha
       - name: Resolve version and dist-tag
         id: version
         env:
@@ -237,8 +334,8 @@ jobs:
           fi
       - name: Publish
         if: steps.version.outputs.published != 'true'
-        # `prepack` builds dist/lib and dist/bin (with the UI and notices).
-        run: npm publish --tag "${{ steps.version.outputs.dist-tag }}"
+        # A tarball publishes as packed: no lifecycle scripts run again.
+        run: npm publish "dist/package/chr33s-git-${{ steps.version.outputs.version }}.tgz" --tag "${{ steps.version.outputs.dist-tag }}"
       - name: Already published
         if: steps.version.outputs.published == 'true'
         run: echo "::notice::${{ steps.version.outputs.version }} is already on npm; nothing to publish"

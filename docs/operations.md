@@ -111,37 +111,30 @@ The adjacent archive `.sha256` checks the compressed bytes. Verify it before
 extracting, then verify `CONTENTS.sha256` inside the extracted directory before
 installation. These checks provide integrity, not publisher authentication.
 
-On version-tag pushes, CI now packages a release-candidate archive after the
-tagged-artifact gate, then runs the clean Linux installation verifier against
-that exact archive (the earlier rehearsal archive is checked separately).
-The installation report includes the compressed archive SHA-256 and embedded
-release manifest, in addition to its executable identity and functional checks.
-The intermediate upload contains exactly three regular files: archive, adjacent
-checksum and `release-installation.json`; it expires after seven days.
-
-The `release_candidate` job runs only after every unit, integration, browser and
-compatibility matrix leg succeeds. It downloads the current run's intermediate
-artifact, verifies the three-file inventory, archive/report/checksum agreement,
-clean tagged candidate identity against the checkout, and successful installation
-checks, then creates and verifies the candidate attestation before retaining
-`verified-release-candidate` for 30 days. A failed or skipped prerequisite,
-attestation generation or signature verification prevents this final handoff. An intermediate upload by
-itself is not sufficient release evidence.
-
-The handoff uses GitHub's same-run
-[artifact download mechanism](https://github.com/actions/download-artifact/tree/v6);
-the distribution remains a tar archive so executable permissions and the helper
-symlink survive transport. Select the final artifact from a successful tag run,
-recheck the adjacent checksum and installation evidence, and retain it in the
-approved release archive before expiration. This workflow currently builds the
-Linux architecture of its Ubuntu runner.
+CI runs on every push, version tags included; it tests the tagged source and
+the rehearsal archive but no longer packages release candidates. The release
+workflow's draft and npm publish wait on a green CI run for the same tag.
 
 `.github/workflows/release.yml` builds, packages (`tools/package-standalone.ts`)
 and smoke-tests the executable for linux-x64, linux-arm64, darwin-arm64 and
-darwin-x64 on the same tag push (or a manual run naming an existing tag), attests
-the archives, and attaches them with a combined `SHA256SUMS` to a **draft**
-GitHub Release. Publish the draft only after CI on that tag is green; the
-workflow refuses to change assets on a release that is already published.
+darwin-x64 on the same tag push (or a manual run naming an existing tag). Each
+Linux archive is also installed into a clean Debian container with no Node or
+source and exercised end to end; the installation report is retained as
+`installation-<target>` for 30 days. The workflow then attests the archives,
+verifies the attestation against this repository, `release.yml`, the run's ref
+and commit and GitHub-hosted runners, and attaches them to a **draft** GitHub
+Release. Publish the draft only after CI on that tag is green; the workflow
+refuses to change assets on a release that is already published. Each release
+carries:
+
+| Asset                                         | What it is                                                  |
+| --------------------------------------------- | ----------------------------------------------------------- |
+| `git-plus-VERSION-OS-ARCH.tar.gz` (`.sha256`) | the executable with its helper link, licenses and notices   |
+| `git+-OS-ARCH` (`.sha`)                       | the same executable, bare; `chmod +x` it after download     |
+| `chr33s-git-VERSION.tgz` (`.sha`)             | the npm package, byte for byte the tarball published to npm |
+| `SHA256SUMS`                                  | every checksum above                                        |
+
+Every archive, executable and npm tarball is attested.
 
 The macOS executables are signed with a Developer ID (hardened runtime, secure
 timestamp, the V8 JIT entitlements in `tools/macos/entitlements.plist`) and
@@ -156,34 +149,21 @@ and an App Store Connect API key for `notarytool`: `APPLE_API_KEY` (base64
 
 The same workflow then publishes `@chr33s/git` to npm with
 [trusted publishing](https://docs.npmjs.com/trusted-publishers): no npm token is
-stored, and npm records provenance. A prerelease publishes under its identifier
+stored, and npm records provenance. It publishes the tarball attached to the
+release rather than packing again. A prerelease publishes under its identifier
 as the dist-tag (`2.0.0-alpha.1` → `alpha`), anything else under `latest`; a
 version already on npm is skipped. Configure the package's trusted publisher on
 npmjs.com as repository `chr33s/git`, workflow `release.yml`, environment `npm`,
-and give the `npm` environment required reviewers so the publish waits for CI. A successful remote tagged
-run is still required to qualify the configured provenance path; local checks do
-not establish that an attestation has been issued or verified.
+and give the `npm` environment required reviewers so the publish waits for CI.
 
-For tag pushes in `chr33s/git`, the final job uses GitHub's
-[artifact attestation action](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations),
-pinned to a commit. Only that job has OIDC and attestation-write permissions.
-It attests the archive bytes, then verifies the resulting bundle against this
-repository, `.github/workflows/ci.yml`, the checked-out source/signer commit and
-version-tag ref, refusing self-hosted runners. The bundle and verification output
-are retained separately as `verified-candidate-provenance` for 30 days, preserving
-the candidate's three-file inventory. The attestation action also uploads its
-statement to GitHub. It identifies the CI workflow's claim about the tested
-archive; it does not establish reproducible builds, independent-builder
-isolation, platform signing or completion of other release gates.
-
-Before extracting a downloaded candidate, select the approved tag and full
+Before extracting a downloaded release archive, select the approved tag and full
 commit from the release record, not from the downloaded archive. Use a GitHub
 CLI with these [verification options](https://cli.github.com/manual/gh_attestation_verify):
 
 ```sh
-gh attestation verify git-plus-VERSION-linux-ARCH.tar.gz \
+gh attestation verify git-plus-VERSION-OS-ARCH.tar.gz \
   --repo chr33s/git \
-  --signer-workflow chr33s/git/.github/workflows/ci.yml \
+  --signer-workflow chr33s/git/.github/workflows/release.yml \
   --source-digest APPROVED_FULL_COMMIT \
   --signer-digest APPROVED_FULL_COMMIT \
   --source-ref refs/tags/vVERSION \
