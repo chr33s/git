@@ -4,6 +4,8 @@ name: Release
 # platform for a version tag, packages and verifies it with the same tools CI
 # uses, attests the archives and attaches them to a *draft* GitHub Release.
 # Publishing the draft is a manual step, taken once CI on the same tag is green.
+# The npm package is then published with trusted publishing (OIDC) behind the
+# `npm` environment.
 
 on:
   push:
@@ -139,7 +141,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  release:
+  github:
     name: Draft GitHub Release
     needs: build
     if: github.repository == 'chr33s/git'
@@ -189,3 +191,54 @@ jobs:
               --title "$TAG" \
               --generate-notes
           fi
+
+  # npm trusted publishing: npm exchanges this job's OIDC token for a
+  # short-lived publish credential, so no NPM_TOKEN secret exists, and attaches
+  # provenance on its own. The package's trusted publisher on npmjs.com must
+  # name this repository, `release.yml` and the `npm` environment; give that
+  # environment required reviewers to hold the publish until CI on the tag is
+  # green, the same gate the draft GitHub Release has.
+  npm:
+    name: Publish to npm
+    needs: [build, github]
+    if: github.repository == 'chr33s/git'
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v6
+        with:
+          # Trusted publishing needs npm >= 11.5.1, which Node 26 ships.
+          node-version: 26
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - name: Resolve version and dist-tag
+        id: version
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          test "$TAG" = "v$version"
+          # npm refuses a prerelease on `latest`: 2.0.0-alpha.1 publishes as `alpha`.
+          case "$version" in
+            *-*) prerelease="${version#*-}"; dist_tag="${prerelease%%.*}" ;;
+            *) dist_tag=latest ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "dist-tag=$dist_tag" >> "$GITHUB_OUTPUT"
+          if npm view "$(node -p 'require("./package.json").name')@$version" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish
+        if: steps.version.outputs.published != 'true'
+        # `prepack` builds dist/lib and dist/bin (with the UI and notices).
+        run: npm publish --tag "${{ steps.version.outputs.dist-tag }}"
+      - name: Already published
+        if: steps.version.outputs.published == 'true'
+        run: echo "::notice::${{ steps.version.outputs.version }} is already on npm; nothing to publish"

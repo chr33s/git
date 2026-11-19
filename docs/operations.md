@@ -152,7 +152,15 @@ The workflow fails without these repository secrets: `MACOS_CERTIFICATE`
 (base64 Developer ID Application `.p12`), `MACOS_CERTIFICATE_PASSWORD`,
 `MACOS_SIGNING_IDENTITY` (e.g. `Developer ID Application: Name (TEAMID)`),
 and an App Store Connect API key for `notarytool`: `APPLE_API_KEY` (base64
-`.p8`), `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`. Linux executables are not signed. A successful remote tagged
+`.p8`), `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`. Linux executables are not signed.
+
+The same workflow then publishes `@chr33s/git` to npm with
+[trusted publishing](https://docs.npmjs.com/trusted-publishers): no npm token is
+stored, and npm records provenance. A prerelease publishes under its identifier
+as the dist-tag (`2.0.0-alpha.1` → `alpha`), anything else under `latest`; a
+version already on npm is skipped. Configure the package's trusted publisher on
+npmjs.com as repository `chr33s/git`, workflow `release.yml`, environment `npm`,
+and give the `npm` environment required reviewers so the publish waits for CI. A successful remote tagged
 run is still required to qualify the configured provenance path; local checks do
 not establish that an attestation has been issued or verified.
 
