@@ -31,12 +31,13 @@ import * as Policy from "../server/Policy.ts";
 import { readGenesis } from "../trust/Genesis.ts";
 import { readPrivateKey } from "./shared.ts";
 import { enableHubUnder, grantMember, opensshPrivateKey } from "../testing/Hub.ts";
+import { execCli } from "../testing/Cli.ts";
 
 const execFileAsync = promisify(execFile);
 const entry = path.join(import.meta.dirname, "bin.ts");
 
 const cli = async (args: ReadonlyArray<string>): Promise<string> => {
-  const result = await execFileAsync(process.execPath, [entry, ...args], { encoding: "utf8" });
+  const result = await execCli(args);
   return `${result.stdout}${result.stderr}`;
 };
 
@@ -49,7 +50,7 @@ const cli = async (args: ReadonlyArray<string>): Promise<string> => {
  * would put them back.
  */
 const stdoutOf = async (args: ReadonlyArray<string>): Promise<string> =>
-  (await execFileAsync(process.execPath, [entry, ...args], { encoding: "utf8" })).stdout;
+  (await execCli(args)).stdout;
 
 /** The same call, for the paths that are supposed to fail. */
 const failing = (args: ReadonlyArray<string>): Promise<string> =>

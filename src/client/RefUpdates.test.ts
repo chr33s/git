@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, it } from "@effect/vitest";
 import { Effect, Layer } from "effect";
-import { NodeServices } from "@effect/platform-node";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Command } from "effect/cli";
 import { fetchCommand } from "../cli/transport.ts";
 import { stores } from "../git/Node.ts";

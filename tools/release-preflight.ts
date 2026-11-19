@@ -14,7 +14,7 @@ assert.ok(
 );
 if (mode === "release") await verifyReleaseArtifact();
 assert.ok(process.platform === "linux" || process.platform === "darwin", "Unix hosts only");
-assert.equal(execFileSync("git", ["--version"], { encoding: "utf8" }).trim(), "git version 2.56.0");
+assert.equal(execFileSync("git", ["--version"], { encoding: "utf8" }).trim(), "git version 2.56.1");
 const gitPath = execFileSync("git", ["--exec-path"], { encoding: "utf8" }).trim();
 accessSync(join(gitPath, "git-http-backend"), constants.X_OK);
 execFileSync("tar", ["--version"], { stdio: "ignore" });

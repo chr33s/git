@@ -96,6 +96,24 @@ const watchPolicy = (page: Page): void => {
   });
 };
 
+/**
+ * Press ⌘K and wait for the rail search to take focus; true once it has.
+ *
+ * Focus lands a render later, through a Command. Typing straight after the
+ * key press raced it, and on Linux WebKit lost: the query went to the body.
+ */
+const focusSearch = async (page: Page): Promise<boolean> => {
+  await page.keyboard.press("Control+k");
+  return page
+    .waitForFunction(() => document.activeElement?.matches(".gp-search input") === true, null, {
+      timeout: 5_000,
+    })
+    .then(
+      () => true,
+      () => false,
+    );
+};
+
 /** `@pierre/diffs` makes the rendered blob a `role=textbox` once attached. */
 const editorBox = (page: Page) => page.locator(".gp-source-host [role='textbox']");
 
@@ -1303,11 +1321,7 @@ const interact = async (browser: BrowserPages, origin: string): Promise<void> =>
   check("the created task joined the list", (await page.locator(".gp-task-row").count()) === 10);
 
   // --- ⌘K and the rail search --------------------------------------------
-  await page.keyboard.press("Control+k");
-  check(
-    "ctrl/cmd-K focuses the rail search",
-    await page.evaluate(() => document.activeElement?.matches(".gp-search input") === true),
-  );
+  check("ctrl/cmd-K focuses the rail search", await focusSearch(page));
   await page.keyboard.type("auth");
   await page.waitForTimeout(900);
   check("a query opens the Search screen", (await route()) === "/hub/search");
@@ -1326,7 +1340,7 @@ const interact = async (browser: BrowserPages, origin: string): Promise<void> =>
     (await page.locator(".gp-search-task-row").count()) === 0 &&
       (await page.inputValue(".gp-search input")) === "",
   );
-  await page.keyboard.press("Control+k");
+  await focusSearch(page);
   await page.keyboard.type("auth");
   await page.waitForTimeout(900);
   check(
@@ -1853,7 +1867,7 @@ const live = async (browser: BrowserPages, origin: string): Promise<void> => {
   // --- search, over /grep -------------------------------------------------
   await page.goto(`${origin}/hub/code`, { waitUntil: "networkidle" });
   await page.waitForTimeout(1500);
-  await page.keyboard.press("Control+k");
+  await focusSearch(page);
   await page.keyboard.type("export const");
   await page.waitForTimeout(1500);
   check(

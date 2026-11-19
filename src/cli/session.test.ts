@@ -8,14 +8,14 @@
  * key that wrote it.
  */
 import assert from "node:assert/strict";
-import { execFile, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, it } from "@effect/vitest";
+import { execCli } from "../testing/Cli.ts";
 
 import { Effect, Layer } from "effect";
 
@@ -25,11 +25,8 @@ import * as GitRepository from "../git/Repository.ts";
 import * as Session from "../hub/Session.ts";
 import { enableHubUnder, opensshPrivateKey } from "../testing/Hub.ts";
 
-const execFileAsync = promisify(execFile);
-const entry = path.join(import.meta.dirname, "bin.ts");
-
 const cli = async (args: ReadonlyArray<string>, cwd?: string): Promise<string> => {
-  const result = await execFileAsync(process.execPath, [entry, ...args], { cwd, encoding: "utf8" });
+  const result = await execCli(args, { cwd });
   return `${result.stdout}${result.stderr}`;
 };
 

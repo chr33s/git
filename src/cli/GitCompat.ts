@@ -9,7 +9,7 @@
 import { Context } from "effect";
 
 /** The stock Git release the differential suite compares against. */
-export const gitCompatibilityBaseline = "2.56.0";
+export const gitCompatibilityBaseline = "2.56.1";
 
 export interface CompatibleCommand {
   /** Git flags whose behavior has differential coverage. */

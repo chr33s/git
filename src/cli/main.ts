@@ -1189,6 +1189,45 @@ const rendered = <E>(error: E): E | Error => {
 };
 
 /**
+ * One parsed invocation as an Effect, without the process runner around it.
+ *
+ * `run` hands this to `NodeRuntime.runMain`; the in-process test runner
+ * (`src/testing/Cli.ts`) runs it with a capturing `Console` instead of paying
+ * a node start-up per command. Domain failures are reported here, through
+ * `Console`, so both see the same stderr line and exit status.
+ */
+const program = (invocation: GitInvocation["Service"]) =>
+  main(invocation.argv).pipe(
+    Effect.mapError(rendered),
+    // A failed verb says why on stderr and exits non-zero. Left to the
+    // runtime's own reporting, the line went to *stdout* — in front of the
+    // JSON several verbs print there, which is the very thing the logger
+    // service below is set to prevent — and carried three frames of this
+    // file's stack under it, which is what `rendered` exists to avoid.
+    // The CLI's own control errors keep their path: they have printed
+    // their help already and carry the status to exit with.
+    Effect.catchIf(
+      (error) => !Predicate.hasProperty(error, CLI_ERROR),
+      (error) =>
+        Console.error(`git+: ${error instanceof Error ? error.message : String(error)}`).pipe(
+          Effect.andThen(
+            Effect.sync(() => {
+              process.exitCode = 1;
+            }),
+          ),
+        ),
+    ),
+    Effect.provideService(GitInvocation, invocation),
+    // Diagnostics on stderr, because stdout is a result. Several verbs print
+    // JSON there and are read by something that parses it, and the default
+    // logger writes to stdout — so one warning from anything the verb touched
+    // (a webhook that would not answer, a mirror that refused) landed in front
+    // of the JSON and the reader got a syntax error instead of a result.
+    Effect.provideService(Logger.LogToStderr, true),
+    Effect.provide(NodeServices.layer),
+  );
+
+/**
  * Parse Git's global invocation before command-local Effect CLI parsing.
  *
  * `-C` has to change the process directory before file-backed command layers
@@ -1214,37 +1253,9 @@ const run = (argv: ReadonlyArray<string> = process.argv.slice(2)) => {
     return;
   }
   if (runCoreCompatibility(parsed.invocation)) return;
-  NodeRuntime.runMain(
-    main(parsed.invocation.argv).pipe(
-      Effect.mapError(rendered),
-      // A failed verb says why on stderr and exits non-zero. Left to the
-      // runtime's own reporting, the line went to *stdout* — in front of the
-      // JSON several verbs print there, which is the very thing the logger
-      // service below is set to prevent — and carried three frames of this
-      // file's stack under it, which is what `rendered` exists to avoid.
-      // The CLI's own control errors keep their path: they have printed
-      // their help already and carry the status to exit with.
-      Effect.catchIf(
-        (error) => !Predicate.hasProperty(error, CLI_ERROR),
-        (error) =>
-          Effect.sync(() => {
-            const message = error instanceof Error ? error.message : String(error);
-            process.stderr.write(`git+: ${message}\n`);
-            process.exitCode = 1;
-          }),
-      ),
-      Effect.provideService(GitInvocation, parsed.invocation),
-      // Diagnostics on stderr, because stdout is a result. Several verbs print
-      // JSON there and are read by something that parses it, and the default
-      // logger writes to stdout — so one warning from anything the verb touched
-      // (a webhook that would not answer, a mirror that refused) landed in front
-      // of the JSON and the reader got a syntax error instead of a result.
-      Effect.provideService(Logger.LogToStderr, true),
-      Effect.provide(NodeServices.layer),
-    ),
-  );
+  NodeRuntime.runMain(program(parsed.invocation));
 };
 
 if (import.meta.main) run();
 
-export { git, main, run };
+export { git, main, program, run };

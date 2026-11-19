@@ -34,6 +34,8 @@ const Input = Schema.Struct({
     md5: Schema.optional(Schema.instanceOf(ArrayBuffer)),
   }),
 });
+/** What the bridge reports for an object: the fields the coordinator reads. */
+export type StoredObject = ReturnType<typeof metadata>;
 const metadata = (value: R2Object) => ({
   key: value.key,
   version: value.version,
@@ -50,10 +52,13 @@ export const bridgeBackupBucket = async (
   request: IncomingMessage,
   response: ServerResponse,
   bucket: Destination,
-  knownLength: (
+  /** A streamed put of a declared length, made where the bucket lives. */
+  putStream: (
+    key: string,
     body: ReadableStream<Uint8Array>,
     length: number,
-  ) => Promise<Parameters<Destination["put"]>[1]>,
+    options: Parameters<Destination["put"]>[2],
+  ) => Promise<StoredObject | null>,
   stop: (key: string, point: "during-put" | "after-put") => boolean,
 ) => {
   const header = Schema.decodeUnknownSync(Schema.NonEmptyString)(request.headers["x-backup-input"]);
@@ -80,10 +85,9 @@ export const bridgeBackupBucket = async (
     const length = Schema.decodeSync(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))(
       Number(request.headers["content-length"]),
     );
-    const body = await knownLength(Readable.toWeb(stream), length);
-    const result = await bucket.put(key, body, input.options);
+    const result = await putStream(key, Readable.toWeb(stream), length, input.options);
     if (stop(key, "after-put")) return;
-    response.end(encodeBackupFrame(result === null ? null : metadata(result)));
+    response.end(encodeBackupFrame(result));
     return;
   }
   assert.equal(request.method, "GET");

@@ -69,7 +69,8 @@ export const openBackupProcess = async (options: {
   readonly targetBucket?: Destination;
   readonly interrupt: (request: Request, point: "before" | "after") => boolean;
   readonly onBucket?: () => void;
-  readonly knownLength?: Parameters<typeof bridgeBackupBucket>[3];
+  /** Streams a put into the target bucket; the archive is only ever read. */
+  readonly putTarget?: Parameters<typeof bridgeBackupBucket>[3];
   readonly interruptBucket?: (key: string, point: "during-put" | "after-put") => boolean;
 }) => {
   let active: ChildProcess | undefined;
@@ -83,9 +84,9 @@ export const openBackupProcess = async (options: {
           request,
           response,
           bucket,
-          options.knownLength ??
+          (request.url === "/target" ? options.putTarget : undefined) ??
             (() => {
-              throw new Error("stream bridge required");
+              throw new Error(`no streamed put for ${request.url}`);
             }),
           (key, point) => {
             if (!options.interruptBucket?.(key, point)) return false;

@@ -95,16 +95,27 @@ describe("the published library", () => {
     }),
   );
 
-  it.effect("peers on the effect this repository pins, and ships nothing else", () =>
-    Effect.sync(() => {
-      // Consumers and this repository must be able to share one Effect: a
-      // second copy splits every `Context` tag and `Schema` brand in two.
-      assert.equal(
-        manifest.peerDependencies?.["effect"],
-        `^${manifest.devDependencies?.["effect"]}`,
-      );
-      assert.equal(manifest.dependencies, undefined);
-      assert.deepEqual(manifest.files, ["dist/lib", "!dist/lib/**/*.tsbuildinfo"]);
-    }),
+  it.effect(
+    "peers on the effect this repository pins, and ships only the library, CLI and UI",
+    () =>
+      Effect.sync(() => {
+        // Consumers and this repository must be able to share one Effect: a
+        // second copy splits every `Context` tag and `Schema` brand in two.
+        assert.equal(
+          manifest.peerDependencies?.["effect"],
+          `^${manifest.devDependencies?.["effect"]}`,
+        );
+        assert.equal(manifest.dependencies, undefined);
+        // The library, plus the bundled `git+` binary and the hub UI it serves.
+        // Build metadata and source maps stay out of the tarball.
+        assert.deepEqual(manifest.files, [
+          "dist/lib",
+          "!dist/lib/**/*.tsbuildinfo",
+          "dist/bin",
+          "dist/ui",
+          "!dist/bin/**/*.map",
+          "!dist/ui/**/*.map",
+        ]);
+      }),
   );
 });

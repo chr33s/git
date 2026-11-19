@@ -9,28 +9,23 @@
  * what Git can be made to agree with, and what the selector says about itself.
  */
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, it } from "@effect/vitest";
+import { execCli } from "../testing/Cli.ts";
 
 import { Effect } from "effect";
 
 import { enableHub, grantMember, opensshPrivateKey } from "../testing/Hub.ts";
 
-const execFileAsync = promisify(execFile);
-const entry = path.join(import.meta.dirname, "bin.ts");
-
 const cli = async (args: ReadonlyArray<string>): Promise<string> => {
-  const result = await execFileAsync(process.execPath, [entry, ...args], { encoding: "utf8" });
+  const result = await execCli(args);
   return `${result.stdout}${result.stderr}`;
 };
 
 const failing = (args: ReadonlyArray<string>, env: Record<string, string> = {}): Promise<string> =>
-  execFileAsync(process.execPath, [entry, ...args], {
-    encoding: "utf8",
+  execCli(args, {
     env: { ...process.env, ...env },
   }).then(
     () => "",

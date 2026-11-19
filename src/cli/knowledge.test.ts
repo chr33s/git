@@ -10,12 +10,11 @@
  * incidental messages kept off it.
  */
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, it } from "@effect/vitest";
+import { execCli } from "../testing/Cli.ts";
 
 import { Effect, Layer } from "effect";
 
@@ -23,9 +22,6 @@ import { stores as nodeStores } from "../git/Node.ts";
 import * as GitRepository from "../git/Repository.ts";
 import { qualify } from "../git/Oid.ts";
 import type { Oid } from "../git/Store.ts";
-
-const execFileAsync = promisify(execFile);
-const entry = path.join(import.meta.dirname, "bin.ts");
 
 interface Ran {
   readonly code: number;
@@ -36,7 +32,7 @@ interface Ran {
 }
 
 const run = (args: ReadonlyArray<string>): Promise<Ran> =>
-  execFileAsync(process.execPath, [entry, ...args], { encoding: "utf8" }).then(
+  execCli(args).then(
     (result) => ({
       code: 0,
       stdout: result.stdout,

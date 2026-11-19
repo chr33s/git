@@ -179,7 +179,7 @@ errors stop installation. Check the adjacent checksum and installed contents as
 well. Remote workflow results and approval of the supported platform/channel
 matrix remain release gates.
 
-Install stock Git `2.56.0` or a compatible version on `PATH`. The Git executable
+Install stock Git `2.56.1` or a compatible version on `PATH`. The Git executable
 must retain its normal HTTP transport helpers. SSH remotes additionally need
 OpenSSH and their usual host-key configuration. Building from source requires
 the development prerequisites in the readme. Windows is outside the Unix CLI

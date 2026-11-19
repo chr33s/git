@@ -2,16 +2,19 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Miniflare } from "miniflare";
-import type { R2Bucket } from "@cloudflare/workers-types";
+import type { R2Bucket, R2PutOptions } from "@cloudflare/workers-types";
+import type { StoredObject } from "./BackupBucketBridge.ts";
 import { build } from "vite-plus/pack";
 import { Schema } from "effect";
 import { decodeBackupFrame, encodeBackupFrame } from "../../tools/cloudflare-backup-codec.ts";
 
 interface Fixture {
-  bridgeStream(
+  putRestored(
+    key: string,
     body: ReadableStream<Uint8Array>,
     length: number,
-  ): Promise<ReadableStream<Uint8Array>>;
+    options: R2PutOptions,
+  ): Promise<StoredObject | null>;
   fetch(url: string, init?: RequestInit): Promise<Response>;
   seed(): Promise<void>;
   capture(): Promise<string>;

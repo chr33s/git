@@ -52,7 +52,7 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: tools/install-git-baseline.sh
-      - run: git --version | grep --fixed-strings "git version 2.56.0"
+      - run: git --version | grep --fixed-strings "git version 2.56.1"
       - run: npm ci
       - run: npm run codegen
       - run: npm run test:integration -- --reporter=default --reporter=./tools/release-test-reporter.ts
@@ -117,7 +117,7 @@ jobs:
           node-version: 26
           cache: npm
       - run: tools/install-git-baseline.sh
-      - run: git --version | grep --fixed-strings "git version 2.56.0"
+      - run: git --version | grep --fixed-strings "git version 2.56.1"
       - run: npm ci
       - run: npm run build:sea
       - uses: actions/setup-node@v6

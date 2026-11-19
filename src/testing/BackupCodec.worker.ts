@@ -32,10 +32,42 @@ interface Env {
   ARCHIVE_RESTORED: R2Bucket;
 }
 export class Store extends DurableObject<Env> {
-  bridgeStream(body: ReadableStream<Uint8Array>, length: number) {
+  /**
+   * Put a Node-side stream into the restore bucket from inside workerd.
+   *
+   * R2 wants a known length, which only `FixedLengthStream` gives a stream.
+   * Handing that stream back to Node for a proxied `put` sent the bytes
+   * workerd → Node → workerd through two nested Miniflare proxies, and on
+   * Linux the second hop's socket was intermittently closed mid-upload.
+   * Writing here keeps it to the one hop the body has to make.
+   */
+  async putRestored(
+    key: string,
+    body: ReadableStream<Uint8Array>,
+    length: number,
+    options: R2PutOptions,
+  ) {
     const fixed = new FixedLengthStream(length);
-    this.ctx.waitUntil(body.pipeTo(fixed.writable).catch(() => undefined));
-    return fixed.readable;
+    const piping = body.pipeTo(fixed.writable);
+    try {
+      const put = await this.env.ARCHIVE_RESTORED.put(key, fixed.readable, options);
+      return put === null
+        ? null
+        : {
+            key: put.key,
+            version: put.version,
+            size: put.size,
+            etag: put.etag,
+            httpEtag: put.httpEtag,
+            uploaded: put.uploaded,
+            httpMetadata: put.httpMetadata,
+            customMetadata: put.customMetadata,
+            storageClass: put.storageClass,
+            checksums: { md5: put.checksums.md5, sha256: put.checksums.sha256 },
+          };
+    } finally {
+      await piping.catch(() => undefined);
+    }
   }
   #checkpointFails = false;
   importStorage() {
@@ -78,11 +110,24 @@ export class Store extends DurableObject<Env> {
           Effect.sync(
             () =>
               new Response(
-                new ReadableStream<Uint8Array>({
-                  start(controller) {
-                    controller.enqueue(new Uint8Array([1]));
-                  },
-                }),
+                // Keeps writing, as a pack stream does. A stream that goes
+                // quiet never learns its client left: on Linux, workerd sees
+                // the disconnect only when its next write fails, so a single
+                // chunk left the lease (and `fence-wait`) pending forever.
+                new ReadableStream<Uint8Array>(
+                  (() => {
+                    let timer: ReturnType<typeof setInterval> | undefined;
+                    return {
+                      start(controller) {
+                        controller.enqueue(new Uint8Array([1]));
+                        timer = setInterval(() => controller.enqueue(new Uint8Array([1])), 25);
+                      },
+                      cancel() {
+                        clearInterval(timer);
+                      },
+                    };
+                  })(),
+                ),
               ),
           ),
         ),

@@ -157,7 +157,7 @@
     "vite": "npm:@voidzero-dev/vite-plus-core@8.3.8000"
   },
   "engines": {
-    "git": "2.56.0",
+    "git": "2.56.1",
     "node": ">=24.12.0"
   },
   "allowScripts": {

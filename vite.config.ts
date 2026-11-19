@@ -155,6 +155,19 @@ export default defineConfig(({ mode }) => ({
       "effecttsgo/process-env": "off",
       "effecttsgo/process-env-in-effect": "off",
       "effecttsgo/unstable-api-usage": "off",
+      // The barrel loads every platform module — Redis, ws, cluster — which
+      // was 800 of the CLI's 1,350 modules at start-up.
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "@effect/platform-node",
+              message: "Import the module directly, e.g. @effect/platform-node/NodeServices.",
+            },
+          ],
+        },
+      ],
       ...antiSlopRules,
     },
   },
@@ -226,9 +239,12 @@ export default defineConfig(({ mode }) => ({
       {
         test: {
           env: gitConfig,
-          fileParallelism: false,
           hookTimeout: 120_000,
           include: ["src/**/*.interop.test.ts"],
+          // Each file works in its own temporary directory and listens on
+          // port 0, so files share nothing. Bounded like `unit`: these spawn
+          // `git`, Chromium and servers of their own.
+          maxWorkers: 4,
           name: "interop",
           testTimeout: 120_000,
         },

@@ -14,12 +14,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, it } from "@effect/vitest";
+import { runCli } from "../testing/Cli.ts";
 
 import { hasGit } from "../testing/Git.ts";
 import { writeKeyPair } from "../testing/Hub.ts";
 
 const execFileAsync = promisify(execFile);
-const entry = path.join(import.meta.dirname, "bin.ts");
 
 const VERIFY = `export function verify(token: string): boolean {
   return token.length > 0
@@ -41,20 +41,11 @@ interface Run {
  * on a non-zero exit would be unable to test the thing that matters most.
  */
 const cli = async (...args: ReadonlyArray<string>): Promise<Run> => {
-  try {
-    const done = await execFileAsync(process.execPath, [entry, ...args], {
-      encoding: "utf8",
-      cwd: root,
-      env: { ...process.env, XDG_CONFIG_HOME: path.join(root, "config") },
-    });
-    return { stdout: `${done.stdout}${done.stderr}`, code: 0 };
-  } catch (failure) {
-    // SAFETY: `execFile`'s rejection is always its own error object, which
-    // carries the child's captured streams and exit code; only those three
-    // fields are read, each guarded for absence.
-    const held = failure as { stdout?: string; stderr?: string; code?: number };
-    return { stdout: `${held.stdout ?? ""}${held.stderr ?? ""}`, code: held.code ?? 1 };
-  }
+  const done = await runCli(args, {
+    cwd: root,
+    env: { ...process.env, XDG_CONFIG_HOME: path.join(root, "config") },
+  });
+  return { stdout: `${done.stdout}${done.stderr}`, code: done.code };
 };
 
 const git = async (...args: ReadonlyArray<string>): Promise<void> => {

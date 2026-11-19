@@ -124,11 +124,8 @@ for (const boundary of [
         client: dispatch(targets),
         archiveBucket: bindings.ARCHIVE,
         targetBucket: bindings.ARCHIVE_RESTORED,
-        knownLength: async (body, length) => {
-          const stream = await bindings.STORE.getByName("stream-bridge").bridgeStream(body, length);
-          // SAFETY: The native fixed-length stream carries Uint8Array chunks across duplicate DOM declarations.
-          return stream as never;
-        },
+        putTarget: (key, body, length, options) =>
+          bindings.STORE.getByName("stream-bridge").putRestored(key, body, length, options ?? {}),
         onBucket: () => {
           bucketReads++;
         },
