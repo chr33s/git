@@ -192,12 +192,14 @@ const candidates = Effect.fn("context.Select.candidates")(function* (
   let truncated = false;
 
   for (const word of words) {
-    const result = yield* repository
-      .search({ ref: tree, pattern: word, fixed: true, ignoreCase: true })
-      // A term the index cannot serve is one term, not a failed selection: the
-      // pack is allowed to be worse, and is not allowed to be a failure the
-      // operator has to decode.
-      .pipe(Effect.catchTag("Invalid", () => Effect.succeed(null)));
+    const result = yield* (
+      repository
+        .search({ ref: tree, pattern: word, fixed: true, ignoreCase: true })
+        // A term the index cannot serve is one term, not a failed selection: the
+        // pack is allowed to be worse, and is not allowed to be a failure the
+        // operator has to decode.
+        .pipe(Effect.catchTag("Invalid", () => Effect.succeed(null)))
+    );
     if (result === null) continue;
     for (const path of result.skipped) skipped.add(path);
     truncated ||= result.truncated;

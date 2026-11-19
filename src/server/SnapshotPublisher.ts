@@ -92,7 +92,7 @@ export const make = Effect.fn("SnapshotPublisher.make")(function* (
     const captured = yield* capture(repo, previous);
     const changed = previous === undefined || !Snapshot.same(previous, captured);
     if (changed) {
-      const previousSequence = yield* Schema.decodeUnknownEffect(
+      const previousSequence = yield* Schema.decodeEffect(
         Schema.Int.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThan(10 ** 10 - 1)),
       )(yield* store.sequence(repo)).pipe(
         Effect.mapError(

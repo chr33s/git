@@ -820,7 +820,7 @@ describe("an address this page used before it moved", () => {
 
 describe("the new-branch dialog", () => {
   it("closes on Cancel, which is the only affordance it has", () => {
-    const { model: after, commands } = update(
+    const { model: after } = update(
       openOn(AppRoute.Code({ path: "" })),
       AppMessage.ClickedCancelNewBranch(),
     );

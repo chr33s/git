@@ -15,7 +15,7 @@ const Conditional = Schema.Struct({
 const Input = Schema.Struct({
   key: Schema.optional(Schema.String),
   options: Schema.Struct({
-    limit: Schema.optional(Schema.Number),
+    limit: Schema.optional(Schema.Finite),
     cursor: Schema.optional(Schema.String),
     onlyIf: Schema.optional(Conditional),
     httpMetadata: Schema.optional(
@@ -77,7 +77,7 @@ export const bridgeBackupBucket = async (
         }
       })(),
     );
-    const length = Schema.decodeUnknownSync(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))(
+    const length = Schema.decodeSync(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))(
       Number(request.headers["content-length"]),
     );
     const body = await knownLength(Readable.toWeb(stream), length);

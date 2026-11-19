@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { ConfigProvider, Effect, Result } from "effect";
+import { ConfigProvider, Effect, Layer, Result, Schema } from "effect";
 import { ArtifactsError } from "@alchemy.run/cloudflare/Artifacts/ReadWriteNamespace";
 import type { TransactionalSql } from "../git/Sql.ts";
 import type { Runner } from "../git/Store.contract.ts";
@@ -25,15 +25,17 @@ export const sqliteCapacityContract = (
       Effect.gen(function* () {
         return { registry: yield* Registry, tokens: yield* Tokens };
       }).pipe(
-        Effect.provide(sqlite(sql)),
         Effect.provide(
-          ConfigProvider.layer(
-            ConfigProvider.fromUnknown({
-              GIT_CF_ARTIFACTS_REGISTRY_ROWS: rows,
-              GIT_CF_ARTIFACTS_TOKEN_ROWS: rows,
-              GIT_CF_ARTIFACTS_REGISTRY_BYTES: bytes,
-              GIT_CF_ARTIFACTS_TOKEN_BYTES: bytes,
-            }),
+          Layer.provideMerge(
+            sqlite(sql),
+            ConfigProvider.layer(
+              ConfigProvider.fromUnknown({
+                GIT_CF_ARTIFACTS_REGISTRY_ROWS: rows,
+                GIT_CF_ARTIFACTS_TOKEN_ROWS: rows,
+                GIT_CF_ARTIFACTS_REGISTRY_BYTES: bytes,
+                GIT_CF_ARTIFACTS_TOKEN_BYTES: bytes,
+              }),
+            ),
           ),
         ),
       ),
@@ -79,7 +81,12 @@ export const sqliteCapacityContract = (
       assert.ok(stored !== undefined);
       const bytes = Object.values(stored).reduce<number>(
         (sum, value) =>
-          sum + (value === null ? 0 : new TextEncoder().encode(String(value)).byteLength),
+          sum +
+          (value === null
+            ? 0
+            : new TextEncoder().encode(
+                Schema.is(Schema.String)(value) ? value : JSON.stringify(value),
+              ).byteLength),
         0,
       );
       const exact = await open(sql, 10, bytes);
@@ -125,7 +132,12 @@ export const sqliteCapacityContract = (
       assert.ok(stored !== undefined);
       const bytes = Object.values(stored).reduce<number>(
         (sum, value) =>
-          sum + (value === null ? 0 : new TextEncoder().encode(String(value)).byteLength),
+          sum +
+          (value === null
+            ? 0
+            : new TextEncoder().encode(
+                Schema.is(Schema.String)(value) ? value : JSON.stringify(value),
+              ).byteLength),
         0,
       );
       sql.exec("DELETE FROM tokens");

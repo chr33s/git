@@ -3,20 +3,22 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { it } from "@effect/vitest";
-import { ConfigProvider, Effect, Result } from "effect";
+import { ConfigProvider, Effect, Layer, Result } from "effect";
 import { ArtifactsError } from "@alchemy.run/cloudflare/Artifacts/ReadWriteNamespace";
 import { RepoStores, repoStoresNode } from "./Namespace.ts";
 
 const open = (root: string, rows: number, bytes = 1024 ** 2) =>
   Effect.runPromise(
     RepoStores.pipe(
-      Effect.provide(repoStoresNode(root)),
       Effect.provide(
-        ConfigProvider.layer(
-          ConfigProvider.fromUnknown({
-            GIT_ARTIFACTS_FORK_ROWS: rows,
-            GIT_ARTIFACTS_FORK_BYTES: bytes,
-          }),
+        Layer.provideMerge(
+          repoStoresNode(root),
+          ConfigProvider.layer(
+            ConfigProvider.fromUnknown({
+              GIT_ARTIFACTS_FORK_ROWS: rows,
+              GIT_ARTIFACTS_FORK_BYTES: bytes,
+            }),
+          ),
         ),
       ),
     ),

@@ -107,8 +107,9 @@ export const runBackupCommand = Effect.fn("Backup.command")(function* (
   const connection = yield* Effect.cached(
     connect(plan.connection).pipe(Effect.provideContext(context)),
   );
+  const run = Effect.runPromiseWith(context);
   const call = <A>(use: (held: Connected) => Promise<A>) =>
-    Effect.runPromise(connection.pipe(Effect.flatMap((held) => io(() => use(held)))));
+    run(connection.pipe(Effect.flatMap((held) => io(() => use(held)))));
   const client: Client = { backup: (request) => call((held) => held.client.backup(request)) };
   const bucket = (role: "bucket" | "archiveBucket"): Destination => ({
     list: (options) => call((held) => held[role].list(options)),

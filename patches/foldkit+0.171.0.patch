@@ -1,8 +1,8 @@
 diff --git a/node_modules/foldkit/dist/dom/dom.js b/node_modules/foldkit/dist/dom/dom.js
-index d45098d..1e0b361 100644
+index bf4f7d7..391b20a 100644
 --- a/node_modules/foldkit/dist/dom/dom.js
 +++ b/node_modules/foldkit/dist/dom/dom.js
-@@ -332,16 +332,14 @@ const findDialogFocusTarget = (dialog, focusSelector) => {
+@@ -364,16 +364,14 @@ const findDialogFocusTarget = (dialog, focusSelector) => {
  const trapFocusWithinDialog = (event, dialog) => {
      const focusable = focusableElementsWithin(dialog);
      if (Array.isReadonlyArrayNonEmpty(focusable)) {

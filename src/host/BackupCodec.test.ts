@@ -261,7 +261,9 @@ it("round-trips native SQL blobs and typed KV data between fresh Durable Objects
     );
     // A late width failure must undo an earlier INSERT and keep the cursor unchanged.
     await assert.rejects(
-      restorePage({ ...firstSql, rows: [...firstSql.rows, { rowid: "0", cells: [] }] }),
+      restorePage(
+        Object.assign({}, firstSql, { rows: [...firstSql.rows, { rowid: "0", cells: [] }] }),
+      ),
       /rejected/,
     );
     const failedRows = decodeBackupFrame(
@@ -430,13 +432,13 @@ it("round-trips native SQL blobs and typed KV data between fresh Durable Objects
     let kvCursor: string | null = null;
     do {
       const frame = await application.capturePage(id, kvCursor, 1);
-      const page: typeof KvPage.Type = decodeBackupFrame(frame, KvPage);
+      const page: KvPage = decodeBackupFrame(frame, KvPage);
       await transfer("kv-page", frame);
       kvCursor = page.next;
     } while (kvCursor !== null);
     const copied = await copyR2Backup(bindings.SOURCE, bindings.RESTORED, 1);
     assert.equal(copied.objects, 7);
-    const resources: Inventory.Resources = {
+    const resources = {
       namespaceInventorySha256: createHash("sha256")
         .update(JSON.stringify(["application-source"]))
         .digest("hex"),
@@ -449,7 +451,7 @@ it("round-trips native SQL blobs and typed KV data between fresh Durable Objects
         contentInventorySha256: copied.contentInventorySha256,
         metadataInventorySha256: copied.metadataInventorySha256,
       },
-    };
+    } satisfies Inventory.Resources;
     const seal = await Effect.runPromise(
       Inventory.sealInventory(backupKey, capturedInventory, resources),
     );
@@ -1479,10 +1481,11 @@ it("round-trips native SQL blobs and typed KV data between fresh Durable Objects
           kind: "inventory",
           sequence: 2,
         },
-        encodeBackupFrame({
-          ...namespaceCompletion,
-          objectsSha256: createHash("sha256").update(duplicatedIndex).digest("hex"),
-        }),
+        encodeBackupFrame(
+          Object.assign({}, namespaceCompletion, {
+            objectsSha256: createHash("sha256").update(duplicatedIndex).digest("hex"),
+          }),
+        ),
       ),
     );
     await fs.writeFile(namespaceCompletionPath, signedDuplicate);

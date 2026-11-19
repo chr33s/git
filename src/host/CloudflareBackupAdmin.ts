@@ -45,7 +45,7 @@ export const make = (
 ): Interface => {
   const serial = Semaphore.makeUnsafe(1);
   const backup = Effect.fn("Backup.administer")(function* (input: Request) {
-    const request = yield* Schema.decodeUnknownEffect(Request)(input).pipe(
+    const request = yield* Schema.decodeEffect(Request)(input).pipe(
       Effect.mapError(() => new Invalid({ field: "backup", reason: "backup request malformed" })),
     );
     if (request.objectId !== objectId)
@@ -77,13 +77,11 @@ export const make = (
       });
       return command._tag === "Release" ? "released" : "abandoned";
     }
-    yield* Effect.try({
-      try: () => {
-        const marker = Schema.decodeUnknownSync(Fence.Marker)(storage.kv.get(Fence.key));
-        if (marker.phase !== "held" || marker.snapshotId !== snapshotId) throw invalid();
-      },
-      catch: invalid,
-    });
+    const stored = yield* Effect.try({ try: () => storage.kv.get(Fence.key), catch: invalid });
+    const marker = yield* Schema.decodeUnknownEffect(Fence.Marker)(stored).pipe(
+      Effect.mapError(invalid),
+    );
+    if (marker.phase !== "held" || marker.snapshotId !== snapshotId) return yield* invalid();
     switch (command._tag) {
       case "Catalog":
         return yield* Effect.try({ try: () => captureSqlCatalog(storage.sql), catch: invalid });

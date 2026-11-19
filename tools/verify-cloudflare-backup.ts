@@ -26,12 +26,13 @@ export const verifyCloudflareBackup = Effect.fn("Backup.verifyOfflineArchive")(f
       // Do not accept the archive's own contents as its trust anchor.
       if (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
         throw invalid();
-      return Schema.decodeSync(Schema.fromJsonString(Expected))(
-        await readBackupFile(expectedFile, 16 * 1024),
-      );
+      return await readBackupFile(expectedFile, 16 * 1024);
     },
     catch: invalid,
-  });
+  }).pipe(
+    Effect.flatMap((text) => Schema.decodeEffect(Schema.fromJsonString(Expected))(text)),
+    Effect.mapError(invalid),
+  );
   const completion = yield* verifyNamespaceArchive({ directory, ...expected });
   return {
     schemaVersion: 1,

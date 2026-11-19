@@ -48,7 +48,7 @@ export const AppMessage = Message.defineMessageUnion({
   GotDetailTabsMessage: { message: Tabs.Message },
   GotTaskFilterMessage: { message: RadioGroup.Message },
   GotTimelineZoomMessage: { message: RadioGroup.Message },
-  CompletedSearchDebounce: { query: Schema.String, version: Schema.Number },
+  CompletedSearchDebounce: { query: Schema.String, version: Schema.Finite },
   // -- the shell --------------------------------------------------------
   /** The address changed: a link, Back, Forward, or a `pushUrl` of our own. */
   ChangedUrl: { route: AppRoute },

@@ -80,8 +80,8 @@ describe("the source tree", () => {
       );
 
       assert.equal(
-        manifestAt("node_modules/vite/package.json").version,
-        manifestAt("node_modules/vite-plus/package.json").version,
+        `npm:@voidzero-dev/vite-plus-core@${manifestAt("node_modules/vite/package.json").version}`,
+        manifestAt("node_modules/vite-plus/package.json").dependencies?.vite,
         "Vite+ and its Vite core must use the same release",
       );
       const viteFrom = (name: string) => createRequire(import.meta.resolve(name)).resolve("vite");

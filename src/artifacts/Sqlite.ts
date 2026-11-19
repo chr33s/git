@@ -49,7 +49,7 @@ const RepoRow = Schema.Struct({
 interface RepoRow extends Schema.Schema.Type<typeof RepoRow> {}
 
 const toRecord = (stored: RepoRow): RepoRecord => {
-  const decoded = Schema.decodeUnknownResult(RepoRow)(stored);
+  const decoded = Schema.decodeResult(RepoRow)(stored);
   if (Result.isFailure(decoded))
     throw failure("STORAGE_FAILURE", "invalid persisted repository metadata");
   const row = decoded.success;
@@ -262,7 +262,7 @@ const TokenRow = Schema.Struct({
 });
 interface TokenRow extends Schema.Schema.Type<typeof TokenRow> {}
 const decodeToken = (row: TokenRow) =>
-  Schema.decodeUnknownEffect(TokenRow)(row).pipe(
+  Schema.decodeEffect(TokenRow)(row).pipe(
     Effect.mapError(() => failure("STORAGE_FAILURE", "invalid persisted token metadata")),
   );
 

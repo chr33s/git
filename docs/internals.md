@@ -20,20 +20,15 @@ constraints the code cannot show you.
 Effect 4 is stable; Alchemy remains in beta. The repo pins exact versions
 with `save-exact=true` so dependency upgrades are tested together.
 
-| package                   | version         | why it matters                                               |
-| ------------------------- | --------------- | ------------------------------------------------------------ |
-| `effect`                  | `4.0.7`         | `Schema`, `HttpApi`, `Stream` and the CLI are core           |
-| `alchemy`                 | `2.0.0-beta.84` | deployment stack as effects                                  |
-| `@alchemy.run/cloudflare` | `2.0.0-beta.84` | Cloudflare resources and runtime bindings                    |
-| `@effect/platform-node`   | `4.0.7`         | node `FileSystem`/`Path`/`NodeRuntime` for the CLI           |
-| `@effect/tsgo`            | `0.63.0`        | Effect diagnostics via Oxlint (`effect-tsgo patch --oxlint`) |
-| `typescript`              | `7.0.2`         | TypeScript-Go                                                |
+| package                   | version         | why it matters                                                      |
+| ------------------------- | --------------- | ------------------------------------------------------------------- |
+| `effect`                  | `4.1.4`         | `Schema`, `HttpApi`, `Stream` and the CLI are core                  |
+| `alchemy`                 | `2.0.0-beta.87` | deployment stack as effects                                         |
+| `@alchemy.run/cloudflare` | `2.0.0-beta.87` | Cloudflare resources and runtime bindings                           |
+| `@effect/platform-node`   | `4.1.4`         | node `FileSystem`/`Path`/`NodeRuntime` for the CLI                  |
+| `@effect/tsgo`            | `0.70.0`        | Effect diagnostics via Oxlint (`effect-tsgo patch --tsrs --oxlint`) |
+| `typescript`              | `7.0.2`         | TypeScript-Go                                                       |
 
-`@alchemy.run/cloudflare` is behind a `patch-package` patch for deferred
-`RepoClient.raw` handles and the Worker runtime platform layer. Workerd cannot
-initialize Node terminal/child-process services; the patched bridge provides
-Node crypto, filesystem, and path adapters without eagerly reading `stdin.once`.
-`npm run verify:worker` exercises the actual entry to catch this startup failure.
 Alchemy's Cloudflare exports now live in that package.
 Operator tooling directly pins `@alchemy.run/cloudflare-runtime` at the matching
 `2.0.0-beta.84` and `@distilled.cloud/cloudflare` at `1.0.0-rc.17`. The backup
@@ -52,7 +47,7 @@ killing a coordinator during a streamed R2 upload produces an unhandled
 `ERR_INVALID_STATE` rejection. `src/miniflare.test.ts` covers both writer-lock
 states; the native R2 process-death rehearsal covers the interrupted upload.
 Retain these regressions when upgrading or removing the patch.
-Overrides align Foldkit's exact Effect 4.0.0 peers with Effect 4.0.7 and make
+Overrides align Foldkit's exact Effect 4.0.0 peers with Effect 4.1.4 and make
 all Vite consumers use Vite+'s core to share one module registry.
 
 Oxlint `typeCheck` and `tsc` both run in `npm run check`; Effect rules live in Oxlint, not `tsc` (`diagnostics: false`).

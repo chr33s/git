@@ -56,10 +56,13 @@ const MAX_LINE = 8 * 1024 * 1024;
 const MAX_FILE = 64 * 1024 * 1024;
 
 /** The only failure this module raises, carrying the status it becomes. */
-class Rejected extends Schema.TaggedError<Rejected>()("Rejected", {
-  status: Schema.Int,
-  message: Schema.String,
-}) {}
+class Rejected extends Schema.TaggedError<Rejected, { readonly brand: unique symbol }>()(
+  "Rejected",
+  {
+    status: Schema.Int,
+    message: Schema.String,
+  },
+) {}
 
 /** Every body this endpoint answers: the commit it made, or why it would not. */
 type Reply =

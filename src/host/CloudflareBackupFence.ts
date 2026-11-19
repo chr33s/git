@@ -1,6 +1,6 @@
 /** Per-object backup admission. Administrative operations require a private trusted caller. */
 import type { DurableObjectStorage } from "@cloudflare/workers-types";
-import { Effect, Exit, Result, Schema } from "effect";
+import { Effect, Result, Schema } from "effect";
 import { StorageFailure } from "../git/Error.ts";
 import * as ResponseDelivery from "./ResponseDelivery.ts";
 
@@ -61,7 +61,7 @@ export const make = (storage: Storage) => {
   };
   const hold = (snapshotId: string) =>
     control(async () => {
-      const next = Schema.decodeUnknownSync(Marker)({ version: 1, snapshotId, phase: "draining" });
+      const next = Schema.decodeSync(Marker)({ version: 1, snapshotId, phase: "draining" });
       const existing = marker();
       if (existing !== undefined && existing.snapshotId !== snapshotId) throw failed();
       storage.kv.put(key, next);
@@ -116,7 +116,7 @@ export const make = (storage: Storage) => {
         const done = acquired.success;
         return yield* restore(work).pipe(
           Effect.map((response) => ResponseDelivery.track(response, done)),
-          Effect.onExit((exit) => (Exit.isFailure(exit) ? Effect.sync(done) : Effect.void)),
+          Effect.onError(() => Effect.sync(done)),
         );
       }),
     );

@@ -10,13 +10,15 @@
  */
 import { Schema } from "effect";
 
-export class ObjectNotFound extends Schema.TaggedError<ObjectNotFound>()(
-  "ObjectNotFound",
-  { oid: Schema.String },
-  { httpApiStatus: 404 },
-) {}
+export class ObjectNotFound extends Schema.TaggedError<
+  ObjectNotFound,
+  { readonly brand: unique symbol }
+>()("ObjectNotFound", { oid: Schema.String }, { httpApiStatus: 404 }) {}
 
-export class RefConflict extends Schema.TaggedError<RefConflict>()(
+export class RefConflict extends Schema.TaggedError<
+  RefConflict,
+  { readonly brand: unique symbol }
+>()(
   "RefConflict",
   {
     ref: Schema.String,
@@ -26,7 +28,10 @@ export class RefConflict extends Schema.TaggedError<RefConflict>()(
   { httpApiStatus: 409 },
 ) {}
 
-export class PackCorrupt extends Schema.TaggedError<PackCorrupt>()(
+export class PackCorrupt extends Schema.TaggedError<
+  PackCorrupt,
+  { readonly brand: unique symbol }
+>()(
   "PackCorrupt",
   {
     reason: Schema.String,
@@ -35,7 +40,10 @@ export class PackCorrupt extends Schema.TaggedError<PackCorrupt>()(
   { httpApiStatus: 422 },
 ) {}
 
-export class StorageFailure extends Schema.TaggedError<StorageFailure>()(
+export class StorageFailure extends Schema.TaggedError<
+  StorageFailure,
+  { readonly brand: unique symbol }
+>()(
   "StorageFailure",
   {
     operation: Schema.String,
@@ -46,30 +54,34 @@ export class StorageFailure extends Schema.TaggedError<StorageFailure>()(
 ) {}
 
 /** Headers may already be sent; response-stream expiry cannot replace them. */
-export class ResponseTimeout extends Schema.TaggedError<ResponseTimeout>()(
-  "ResponseTimeout",
-  { kind: Schema.Literals(["idle", "absolute"]) },
-  { httpApiStatus: 504 },
-) {
+export class ResponseTimeout extends Schema.TaggedError<
+  ResponseTimeout,
+  { readonly brand: unique symbol }
+>()("ResponseTimeout", { kind: Schema.Literals(["idle", "absolute"]) }, { httpApiStatus: 504 }) {
   override get message() {
     return `response ${this.kind} deadline exceeded`;
   }
 }
 
-export class LfsQuotaExceeded extends Schema.TaggedError<LfsQuotaExceeded>()(
+export class LfsQuotaExceeded extends Schema.TaggedError<
+  LfsQuotaExceeded,
+  { readonly brand: unique symbol }
+>()(
   "LfsQuotaExceeded",
   { resource: Schema.Literals(["bytes", "objects"]) },
   { httpApiStatus: 507 },
 ) {}
 
-export class LfsQuotaBusy extends Schema.TaggedError<LfsQuotaBusy>()(
-  "LfsQuotaBusy",
-  {},
-  { httpApiStatus: 503 },
-) {}
+export class LfsQuotaBusy extends Schema.TaggedError<
+  LfsQuotaBusy,
+  { readonly brand: unique symbol }
+>()("LfsQuotaBusy", {}, { httpApiStatus: 503 }) {}
 
 /** A source anchor could not be inspected by the selected resolver. */
-export class AnchorResolutionFailure extends Schema.TaggedError<AnchorResolutionFailure>()(
+export class AnchorResolutionFailure extends Schema.TaggedError<
+  AnchorResolutionFailure,
+  { readonly brand: unique symbol }
+>()(
   "AnchorResolutionFailure",
   {
     operation: Schema.String,
@@ -79,7 +91,7 @@ export class AnchorResolutionFailure extends Schema.TaggedError<AnchorResolution
   { httpApiStatus: 422 },
 ) {}
 
-export class Invalid extends Schema.TaggedError<Invalid>()(
+export class Invalid extends Schema.TaggedError<Invalid, { readonly brand: unique symbol }>()(
   "Invalid",
   {
     field: Schema.String,
@@ -89,14 +101,20 @@ export class Invalid extends Schema.TaggedError<Invalid>()(
 ) {}
 
 /** An aggregate request budget was exceeded before further work was admitted. */
-export class RequestLimitExceeded extends Schema.TaggedError<RequestLimitExceeded>()(
+export class RequestLimitExceeded extends Schema.TaggedError<
+  RequestLimitExceeded,
+  { readonly brand: unique symbol }
+>()(
   "RequestLimitExceeded",
-  { budget: Schema.String, limit: Schema.Number },
+  { budget: Schema.String, limit: Schema.Finite },
   { httpApiStatus: 413 },
 ) {}
 
 /** A hook rejected a push; carried as a value, not thrown. */
-export class HookRejected extends Schema.TaggedError<HookRejected>()(
+export class HookRejected extends Schema.TaggedError<
+  HookRejected,
+  { readonly brand: unique symbol }
+>()(
   "HookRejected",
   {
     hook: Schema.Literals(["pre-receive", "update", "post-receive"]),

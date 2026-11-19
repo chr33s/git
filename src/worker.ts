@@ -311,6 +311,7 @@ export default Git.make(
           const incoming = yield* HttpServerRequest.HttpServerRequest;
           // SAFETY: the bridge retains the platform Request as source.
           const original = incoming.source as Request;
+          // oxlint-disable-next-line effecttsgo/abort-controller-in-effect -- Aborted on demand by the admission callback, not at scope close, so Effect.abortSignal does not apply.
           const cancellation = new AbortController();
           const upload = RequestUpload.open(
             original,

@@ -143,7 +143,7 @@ export const ForgetCopied = Command.define("ForgetCopied", {
 
 /** Keep typing responsive while delaying the repository search. */
 export const DebounceSearch = Command.define("DebounceSearch", {
-  args: { query: Schema.String, version: Schema.Number },
+  args: { query: Schema.String, version: Schema.Finite },
   messages: [AppMessage.CompletedSearchDebounce],
   execute: ({ query, version }) =>
     Effect.sleep("200 millis").pipe(

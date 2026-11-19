@@ -135,9 +135,11 @@ describe("Webhooks", () => {
       assert.match(logged[0] ?? "", /"durationMs":0/);
     }).pipe(
       Effect.provide(
-        subscribersOf([{ id: "delayed", url: "https://fixture/hook", secret: "private" }]),
+        Layer.mergeAll(
+          subscribersOf([{ id: "delayed", url: "https://fixture/hook", secret: "private" }]),
+          Logger.layer([capture]),
+        ),
       ),
-      Effect.provide(Logger.layer([capture])),
     );
   });
 
@@ -185,11 +187,13 @@ describe("Webhooks", () => {
       yield* deliver(results, { retries: 0 }).pipe(
         Effect.provideService(HttpClient.HttpClient, client),
         Effect.provide(
-          subscribersOf([
-            { id: "receiver-1", url: `https://fixture/hook?token=${secret}`, secret },
-          ]),
+          Layer.mergeAll(
+            subscribersOf([
+              { id: "receiver-1", url: `https://fixture/hook?token=${secret}`, secret },
+            ]),
+            Logger.layer([capture]),
+          ),
         ),
-        Effect.provide(Logger.layer([capture])),
       );
       assert.ok(
         logged.some(

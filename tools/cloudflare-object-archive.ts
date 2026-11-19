@@ -53,7 +53,7 @@ const rpc = Effect.fn("Backup.archiveRpc")(function* (
 ) {
   const value = yield* io(() => client.backup({ objectId, snapshotId, command }));
   // Raw Alchemy RPC failures are envelopes, not thrown exceptions.
-  return yield* Schema.decodeUnknownEffect(Schema.String)(value).pipe(Effect.mapError(invalid));
+  return yield* Schema.decodeEffect(Schema.String)(value).pipe(Effect.mapError(invalid));
 });
 const write = async (file: string, value: string) => {
   const output = await fs.open(file, "wx", 0o600);

@@ -45,7 +45,7 @@ const read = (storage: Storage, snapshotId: string) => {
 export const beginSqlRestore = (storage: Storage, snapshotId: string, frame: string) => {
   const catalog = decodeBackupFrame(frame, SqlCatalog);
   const progress = encodeBackupFrame(
-    Schema.decodeUnknownSync(Progress)({ snapshotId, catalog, tableIndex: 0, after: null }),
+    Schema.decodeSync(Progress)({ snapshotId, catalog, tableIndex: 0, after: null }),
   );
   transaction(storage, () => {
     const existing = storage.sql

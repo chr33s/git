@@ -76,11 +76,10 @@ export interface DeliveryOptions {
 }
 
 /** Typed like every other failure in the codebase, not a hand-rolled `_tag`. */
-export class DeliveryFailed extends Schema.TaggedError<DeliveryFailed>()(
-  "DeliveryFailed",
-  { url: Schema.String, reason: Schema.String },
-  { httpApiStatus: 502 },
-) {}
+export class DeliveryFailed extends Schema.TaggedError<
+  DeliveryFailed,
+  { readonly brand: unique symbol }
+>()("DeliveryFailed", { url: Schema.String, reason: Schema.String }, { httpApiStatus: 502 }) {}
 
 /** One subscriber's signed request, with a timeout for each attempt. */
 export const post = Effect.fn("Webhooks.post")(function* (

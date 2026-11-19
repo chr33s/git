@@ -10,7 +10,7 @@ import {
 } from "../../tools/cloudflare-backup-auth.ts";
 import { encodeBackupFrame, frameBytes } from "../../tools/cloudflare-backup-codec.ts";
 
-const position: Position = {
+const position: Schema.Schema.Type<typeof Position> = {
   installationId: "installation-one",
   snapshotId: "snapshot-one",
   objectId: "object-one",

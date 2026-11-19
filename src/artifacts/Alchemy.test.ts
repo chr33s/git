@@ -1,18 +1,12 @@
 /**
- * The upstream blocker, patched locally.
+ * The upstream shape the local provider must satisfy.
  *
- * One interface change is needed upstream before a third-party provider can
- * satisfy the Artifacts binding:
- * `RepoClient.raw` must be deferred (an `Effect`) rather than an eager
- * `ArtifactsRepo` no off-platform provider can construct.
- * `patches/@alchemy.run+cloudflare+2.0.0-beta.84.patch` applies exactly that change — the one
- * proposed upstream — via `patch-package` on `prepare`.
- *
- * The assertions here are compile-time: if the patch stopped applying, `raw`
- * reverts to an eager handle and this file fails `npm run check`.
+ * `RepoClient.raw` is an eager `ArtifactsRepo` that no off-platform provider can
+ * construct, so `Namespace.ts` hands out a stand-in that refuses every use. If
+ * alchemy defers `raw` (an `Effect`) the stand-in becomes unnecessary; this
+ * compile-time assertion fails `npm run check` so it can be dropped.
  */
 import assert from "node:assert/strict";
-import * as fs from "node:fs";
 import { describe, it } from "@effect/vitest";
 
 import type { Artifacts } from "@alchemy.run/cloudflare";
@@ -20,23 +14,14 @@ import { Effect } from "effect";
 
 type Raw = Artifacts.RepoClient["raw"];
 
-/** `true` only when `raw` is an Effect — the patched, provider-friendly shape. */
-type Deferred = Raw extends Effect.Effect<infer _A, infer _E, infer _R> ? true : false;
-const rawIsDeferred: Deferred = true;
+/** `true` while `raw` is still an eager handle rather than an Effect. */
+type Eager = Raw extends Effect.Effect<infer _A, infer _E, infer _R> ? false : true;
+const rawIsEager: Eager = true;
 
-/** And its failure channel carries `ArtifactsError`, so a local provider can decline. */
-type Failure = Raw extends Effect.Effect<infer _A, infer E, infer _R> ? E : never;
-const failureIsDeclined: Failure extends { readonly _tag: string } ? true : false = true;
-
-describe("alchemy patch", () => {
-  it.effect("defers RepoClient.raw, per the local patch-package patch", () =>
+describe("alchemy RepoClient", () => {
+  it.effect("keeps RepoClient.raw an eager handle, which the local provider stubs", () =>
     Effect.sync(() => {
-      assert.equal(rawIsDeferred, true);
-      assert.equal(failureIsDeclined, true);
-      assert.ok(
-        fs.existsSync("patches/@alchemy.run+cloudflare+2.0.0-beta.84.patch"),
-        "the patch file ships with the repository",
-      );
+      assert.equal(rawIsEager, true);
     }),
   );
 });

@@ -177,10 +177,13 @@ describe.skipIf(!hasGit)("interrupted Node ref transactions", () => {
         const refs = await Effect.runPromise(
           RefStore.use((store) => store.list()).pipe(Effect.provide(stores(repository))),
         );
-        assert.deepEqual([...refs].sort(), [
-          ["refs/heads/main", before],
-          ["refs/heads/other", before],
-        ]);
+        assert.deepEqual(
+          [...refs].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
+          [
+            ["refs/heads/main", before],
+            ["refs/heads/other", before],
+          ],
+        );
         assert.equal((await execute("none")).stdout.trim(), "true");
         await assert.rejects(fs.stat(journal), { code: "ENOENT" });
         git("fsck", "--strict");

@@ -14,8 +14,8 @@
  *
  * The two `raw` escape hatches follow alchemy's `LocalR2Gateway` precedent:
  * the namespace-level one dies with guidance (its type says `never`), and
- * `RepoClient.raw` — deferred by `patches/@alchemy.run+cloudflare+2.0.0-beta.84.patch` —
- * fails with a typed `ArtifactsError` a caller can handle.
+ * `RepoClient.raw` — an eager `ArtifactsRepo` no off-platform provider can
+ * construct — throws an `ArtifactsError` with guidance on first use.
  */
 // Deep imports on purpose: the `@alchemy.run/cloudflare` barrel drags in modules
 // whose runtime needs `@effect/platform-node` and a newer `effect` than this
@@ -23,10 +23,14 @@
 import type { Namespace as ArtifactsNamespace } from "@alchemy.run/cloudflare/Artifacts/Namespace";
 import {
   ArtifactsError,
+  type CommitMetadata,
   type ListOptions,
+  type LogOptions,
   ReadWriteNamespace,
   type ReadWriteNamespaceClient,
+  type ReadFileOptions,
   type RepoClient,
+  type TreeEntry,
 } from "@alchemy.run/cloudflare/Artifacts/ReadWriteNamespace";
 import { Context, Effect, Exit, Layer, Result, Schema, Semaphore, Stream } from "effect";
 
@@ -42,8 +46,16 @@ import {
   retirePacksAndRemove,
   stores as nodeStores,
 } from "../git/Node.ts";
-import { bytesToHex } from "../git/Format.ts";
-import { checkRefName, ObjectStore, RefStore } from "../git/Store.ts";
+import {
+  bytesToHex,
+  isExecutable,
+  isGitlink,
+  isSymlink,
+  isTree,
+  parseCommit,
+  parseTree,
+} from "../git/Format.ts";
+import { checkRefName, isOid, ObjectStore, RefStore, type Oid } from "../git/Store.ts";
 import { make as registryFile } from "./RegistryFile.node.ts";
 import { make as tokenFile } from "./TokenFile.node.ts";
 import {
@@ -1505,13 +1517,175 @@ export const localNamespace = (
             }),
           );
 
+        // `RepoClient.raw` is an eager `ArtifactsRepo`, which only the Workers
+        // runtime can produce. Hand out a stand-in that refuses every use.
+        const offPlatformRepo: RepoClient["raw"] = new Proxy(
+          // SAFETY: the target is never reached; every property read throws
+          // before a member of `ArtifactsRepo` could be observed.
+          {} as RepoClient["raw"],
+          {
+            get: () => {
+              throw failure(
+                "INTERNAL_ERROR",
+                "ArtifactsRepo cannot be produced off-platform; use the client methods",
+              );
+            },
+          },
+        );
+
+        /** A git failure, surfaced the way the platform surfaces one. */
+        const unexpected = (error: { readonly _tag: string }) =>
+          failure("INTERNAL_ERROR", `${error._tag} while reading the repository`);
+
+        const entryType = (mode: string): TreeEntry["type"] =>
+          isTree(mode)
+            ? "tree"
+            : isGitlink(mode)
+              ? "gitlink"
+              : isSymlink(mode)
+                ? "symlink"
+                : isExecutable(mode)
+                  ? "exec"
+                  : "blob";
+
+        /** `null` where the object is absent or not of the `type` asked for. */
+        const readTyped = (stores: StoreInstances, oid: Oid, type: "blob" | "tree" | "commit") =>
+          stores.objects.read(oid).pipe(
+            Effect.map((object) => (object.type === type ? object.data : null)),
+            Effect.catchTag("ObjectNotFound", () => Effect.succeed(null)),
+            Effect.mapError(unexpected),
+          );
+
+        const readCommitAt = (stores: StoreInstances, oid: Oid) =>
+          Effect.gen(function* () {
+            const data = yield* readTyped(stores, oid, "commit");
+            if (data === null) return null;
+            const parsed = parseCommit(data);
+            if (Result.isFailure(parsed))
+              return yield* failure("INTERNAL_ERROR", `${oid} is not a commit`);
+            const commit = parsed.success;
+            return {
+              hash: oid,
+              treeHash: commit.tree,
+              message: commit.message.replace(/\n$/, ""),
+              author: { name: commit.author.name, email: commit.author.email },
+              committer: { name: commit.committer.name, email: commit.committer.email },
+              parents: [...commit.parents],
+              authoredAt: Math.floor(commit.author.at.getTime() / 1000),
+              committedAt: Math.floor(commit.committer.at.getTime() / 1000),
+            } satisfies CommitMetadata;
+          });
+
+        /** A commit named by hash, branch, tag, or `HEAD`; `null` when nothing resolves. */
+        const resolveCommit = (stores: StoreInstances, ref: string) =>
+          Effect.gen(function* () {
+            const candidates = isOid(ref)
+              ? [ref]
+              : ref === "HEAD"
+                ? ["HEAD"]
+                : [ref, `refs/heads/${ref}`, `refs/tags/${ref}`];
+            for (const candidate of candidates) {
+              const oid = isOid(candidate)
+                ? candidate
+                : yield* stores.refs.resolve(candidate).pipe(Effect.mapError(unexpected));
+              if (oid === null) continue;
+              if ((yield* readTyped(stores, oid, "commit")) !== null) return oid;
+            }
+            return null;
+          });
+
+        const repoReaders = (record: RepoRecord) => {
+          // Reads take no reservation: concurrent readers must not refuse each other.
+          const stores = Effect.gen(function* () {
+            const current = yield* ready(record.name);
+            if (current.id !== record.id) {
+              return yield* failure("NOT_FOUND", `repo '${record.name}' was replaced`);
+            }
+            return yield* repoStores.open(record.name);
+          });
+          return {
+            info: () => ready(record.name).pipe(Effect.map(info)),
+            log: (opts?: LogOptions) =>
+              Effect.gen(function* () {
+                const open = yield* stores;
+                const limit = Math.min(opts?.limit ?? 50, 1000);
+                let offset = opts?.offset ?? 0;
+                let next = yield* resolveCommit(open, opts?.ref ?? "HEAD");
+                const commits: CommitMetadata[] = [];
+                while (next !== null && commits.length < limit) {
+                  const commit = yield* readCommitAt(open, next);
+                  if (commit === null) break;
+                  if (offset > 0) offset -= 1;
+                  else commits.push(commit);
+                  const [first] = commit.parents;
+                  next = first !== undefined && isOid(first) ? first : null;
+                }
+                return commits;
+              }),
+            readCommit: (hash: string) =>
+              Effect.gen(function* () {
+                if (!isOid(hash)) return yield* failure("INVALID_INPUT", `'${hash}'`);
+                return yield* readCommitAt(yield* stores, hash);
+              }),
+            readTree: (hash: string) =>
+              Effect.gen(function* () {
+                if (!isOid(hash)) return yield* failure("INVALID_INPUT", `'${hash}'`);
+                const data = yield* readTyped(yield* stores, hash, "tree");
+                if (data === null) return null;
+                const parsed = parseTree(data);
+                if (Result.isFailure(parsed)) {
+                  return yield* failure("INTERNAL_ERROR", `${hash} is not a tree`);
+                }
+                return parsed.success.map((entry): TreeEntry => ({
+                  name: entry.name,
+                  mode: entry.mode,
+                  hash: entry.oid,
+                  type: entryType(entry.mode),
+                }));
+              }),
+            readBlob: (hash: string) =>
+              Effect.gen(function* () {
+                if (!isOid(hash)) return yield* failure("INVALID_INPUT", `'${hash}'`);
+                const data = yield* readTyped(yield* stores, hash, "blob");
+                return data === null ? null : new Blob([data.slice()]);
+              }),
+            readFile: (args: ReadFileOptions) =>
+              Effect.gen(function* () {
+                const segments = args.path.split("/").filter((segment) => segment !== "");
+                if (args.ref === "" || segments.length === 0) {
+                  return yield* failure("INVALID_INPUT", "ref and path must not be empty");
+                }
+                const open = yield* stores;
+                const commit = yield* resolveCommit(open, args.ref);
+                if (commit === null) return null;
+                let tree: Oid | null = (yield* readCommitAt(open, commit))?.treeHash ?? null;
+                for (const [index, segment] of segments.entries()) {
+                  const data: Uint8Array | null =
+                    tree === null ? null : yield* readTyped(open, tree, "tree");
+                  if (data === null) return null;
+                  const parsed = parseTree(data);
+                  if (Result.isFailure(parsed)) {
+                    return yield* failure("INTERNAL_ERROR", `${tree} is not a tree`);
+                  }
+                  const entry = parsed.success.find((candidate) => candidate.name === segment);
+                  if (entry === undefined) return null;
+                  if (index < segments.length - 1) {
+                    if (!isTree(entry.mode)) return null;
+                    tree = entry.oid;
+                    continue;
+                  }
+                  if (isTree(entry.mode) || isGitlink(entry.mode)) return null;
+                  const blob = yield* readTyped(open, entry.oid, "blob");
+                  return blob === null ? null : new Blob([blob.slice()]);
+                }
+                return null;
+              }),
+          };
+        };
+
         const repoClient = (record: RepoRecord): RepoClient => ({
-          raw: Effect.fail(
-            failure(
-              "INTERNAL_ERROR",
-              "ArtifactsRepo cannot be produced off-platform; use the client methods",
-            ),
-          ),
+          ...repoReaders(record),
+          raw: offPlatformRepo,
           createToken: (scope, ttl) =>
             withCurrent(record, tokens.issue(record.name, scope ?? "read", ttl ?? 3600)),
           listTokens: () => withCurrent(record, tokens.list(record.name)),

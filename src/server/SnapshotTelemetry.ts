@@ -13,7 +13,7 @@ interface Age {
 
 /** Age describes capture time, not whether any repository change was missed. */
 const age = (publishedAt: string, now: number): Age => {
-  const decoded = Schema.decodeUnknownResult(Timestamp)(publishedAt);
+  const decoded = Schema.decodeResult(Timestamp)(publishedAt);
   if (Result.isFailure(decoded)) return { ageState: "invalid", ageMs: null };
   const elapsed = now - Date.parse(decoded.success);
   return elapsed < 0 ? { ageState: "future", ageMs: null } : { ageState: "known", ageMs: elapsed };

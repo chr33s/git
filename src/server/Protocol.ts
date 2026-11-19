@@ -994,7 +994,7 @@ export const receivePack = Effect.fn("Protocol.receivePack")(function* (request:
         objects: limits.receiveObjects,
         expandedBytes: limits.receiveExpandedBytes,
       }),
-      Effect.map(() => null),
+      Effect.as(null),
       Effect.catch((error) => Effect.succeed(error)),
     );
     if (unpacked !== null) {

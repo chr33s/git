@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
-import { Effect, Logger, Stream } from "effect";
+import { Effect, Layer, Logger, Stream } from "effect";
 import { StorageFailure } from "./Error.ts";
 import * as Maintenance from "./Maintenance.ts";
 import { stores } from "./Memory.ts";
@@ -45,7 +45,7 @@ for (const operation of ["fsck", "gc"] as const) {
       if (operation === "fsck") yield* Maintenance.fsck({ objects, refs });
       else yield* Maintenance.gc({ objects, refs, packs });
       assert.equal(messages.length, 1);
-    }).pipe(Effect.provide(stores), Effect.provide(Logger.layer([logger])));
+    }).pipe(Effect.provide(Layer.merge(stores, Logger.layer([logger]))));
   });
 }
 
@@ -68,6 +68,6 @@ it.effect(
       assert.equal(messages.length, 1);
       assert.match(messages[0] ?? "", /integrity_failed/);
       assert.doesNotMatch(messages.join(""), new RegExp(`${secret}|${oid}`));
-    }).pipe(Effect.provide(stores), Effect.provide(Logger.layer([logger])));
+    }).pipe(Effect.provide(Layer.merge(stores, Logger.layer([logger]))));
   },
 );

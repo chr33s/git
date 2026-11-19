@@ -101,10 +101,9 @@ export const connectCloudflareBackup = Effect.fn("Backup.connect")(function* (in
       catch: invalid,
     });
     // Alchemy can return an error envelope instead of throwing through raw RPC.
-    return yield* Schema.decodeUnknownEffect(Schema.String)(response).pipe(
-      Effect.mapError(invalid),
-    );
+    return yield* Schema.decodeEffect(Schema.String)(response).pipe(Effect.mapError(invalid));
   });
-  const client: Client = { backup: (request) => Effect.runPromise(backup(request)) };
+  const run = Effect.runPromiseWith(yield* Effect.context<never>());
+  const client: Client = { backup: (request) => run(backup(request)) };
   return { client, bucket: proxy.env.LIVE, archiveBucket: proxy.env.ARCHIVE };
 });

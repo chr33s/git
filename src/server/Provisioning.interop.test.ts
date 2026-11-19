@@ -5,12 +5,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { describe, it } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, type Schema } from "effect";
 import { fastImport, gitIn, hasGit, importCommit } from "../testing/Git.ts";
 import { enableHub } from "../testing/Hub.ts";
 import { GENESIS_REF } from "../trust/Genesis.ts";
 import { LOG_REF } from "../trust/Log.ts";
-import { decode, validate } from "./Provisioning.ts";
+import * as Provisioning from "./Provisioning.ts";
+
+const { decode, validate } = Provisioning;
 
 describe.skipIf(!hasGit)("operator provisioning preparation", () => {
   it("exports a private verified artifact whose identity-only pack stock Git can reopen", async () => {
@@ -39,7 +41,9 @@ describe.skipIf(!hasGit)("operator provisioning preparation", () => {
       await promisify(execFile)(process.execPath, args, { timeout: 20_000 });
       assert.equal((await fs.stat(output)).mode & 0o777, 0o600);
       const bytes = new Uint8Array(await fs.readFile(output));
-      const artifact = await Effect.runPromise(decode(bytes, "private-repo"));
+      const artifact: Schema.Schema.Type<typeof Provisioning.Artifact> = await Effect.runPromise(
+        decode(bytes, "private-repo"),
+      );
       assert.equal(artifact.repoId, fixture.repoId);
       // Validation above warmed genesis/signature caches. A pack with the same
       // tips but an omitted blob must still fail its independent closure check.

@@ -12,7 +12,7 @@ export const TimelineZoom = RadioGroup.create<"day" | "week" | "month">();
 export const ActionMenu = Menu.create<string>();
 
 export const Model = Schema.Struct({
-  searchVersion: Schema.Number,
+  searchVersion: Schema.Finite,
   dialogs: Schema.Struct({
     newTask: Dialog.Model,
     newBranch: Dialog.Model,

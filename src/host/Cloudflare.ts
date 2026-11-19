@@ -461,6 +461,7 @@ export default Repo.make(
           // wrapper was built from it, so `source` is that very object rather
           // than a rebuild of it.
           const original = incoming.source as Request;
+          // oxlint-disable-next-line effecttsgo/abort-controller-in-effect -- Aborted on demand by the admission callback, not at scope close, so Effect.abortSignal does not apply.
           const cancellation = new AbortController();
           const upload = RequestUpload.open(
             original,

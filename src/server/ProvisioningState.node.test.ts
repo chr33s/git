@@ -6,13 +6,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, type Schema } from "effect";
 import type { Sql } from "../git/Sql.ts";
 import { GENESIS_REF } from "../trust/Genesis.ts";
 import { LOG_REF } from "../trust/Log.ts";
 import * as ProvisioningState from "./ProvisioningState.ts";
 
-const reservation: ProvisioningState.Reservation = {
+const reservation: Schema.Schema.Type<typeof ProvisioningState.Reservation> = {
   digest: "a".repeat(64),
   repoId: "SHA256:" + "A".repeat(43),
   genesis: "b".repeat(40),

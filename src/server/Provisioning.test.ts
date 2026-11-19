@@ -103,7 +103,8 @@ describe("operator provisioning artifacts", () => {
       Effect.gen(function* () {
         yield* seed(["repo.admin"]);
         const bytes = yield* Provisioning.prepare("repo");
-        const artifact = yield* Provisioning.decode(bytes, "repo");
+        const artifact: Schema.Schema.Type<typeof Provisioning.Artifact> =
+          yield* Provisioning.decode(bytes, "repo");
         for (const invalid of [
           { ...artifact, repoId: "sha256:wrong" },
           { ...artifact, genesis: "not-an-oid" },

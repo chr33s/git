@@ -4,7 +4,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { it } from "@effect/vitest";
-import { ConfigProvider, Deferred, Effect, Fiber, Stream } from "effect";
+import { ConfigProvider, Deferred, Effect, Fiber, Layer, Stream } from "effect";
 import { LfsStore } from "./Lfs.ts";
 import { file } from "./Lfs.node.ts";
 import { configuration } from "./LfsCapacity.node.ts";
@@ -22,7 +22,7 @@ const write = (root: string, content: string, bytes = 10, objects = 100) =>
   Effect.gen(function* () {
     const store = yield* LfsStore;
     return yield* store.write(oid(content), body(content));
-  }).pipe(Effect.provide(file(root)), Effect.provide(limits(bytes, objects)));
+  }).pipe(Effect.provide(Layer.provideMerge(file(root), limits(bytes, objects))));
 
 for (const mode of ["bytes", "objects", "orphan"] as const)
   it.live(`counts retained ${mode} across backend reopen and preserves existing content`, () =>
@@ -67,7 +67,7 @@ it.live("holds the exclusive lock through a pending upload, then releases it on 
           Stream.flatMap(() => Stream.never),
         ),
       );
-    }).pipe(Effect.provide(file(root)), Effect.provide(limits()), Effect.forkScoped);
+    }).pipe(Effect.provide(Layer.provideMerge(file(root), limits())), Effect.forkScoped);
     yield* Deferred.await(entered);
     const busy = yield* write(root, "abc").pipe(Effect.result);
     assert.equal(busy._tag, "Failure");

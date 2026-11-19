@@ -1,6 +1,16 @@
 import { Invalid } from "../git/Error.ts";
 import { Config, Effect, Schema } from "effect";
 
+declare global {
+  /**
+   * Workers' `RequestInit` omits `duplex`, which streamed request bodies
+   * require on every runtime we host (workerd, undici).
+   */
+  interface RequestInit<Cf = CfProperties> {
+    duplex?: "half";
+  }
+}
+
 export const configuration = Effect.fn("RequestUpload.configuration")(function* () {
   return yield* Config.schema(
     Schema.Int.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(2_147_483_647)),
@@ -73,7 +83,7 @@ export const open = (original: Request, signal: AbortSignal, idleMs = 30_000) =>
     { highWaterMark: 0 },
   );
   return {
-    request: new Request(original, { body, signal, ...{ duplex: "half" } }),
+    request: new Request(original, { method: original.method, body, signal, duplex: "half" }),
     close: () => abort(),
     idle: idle.promise,
   };

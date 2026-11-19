@@ -1,4 +1,4 @@
-import { Config, Effect, Exit, Schema } from "effect";
+import { Config, Effect, Schema } from "effect";
 import * as ResponseDelivery from "./ResponseDelivery.ts";
 
 const positive = Schema.Int.check(
@@ -99,7 +99,7 @@ export const make = Effect.fn("CloudflareAdmission.make")(function* (
           Effect.map((response) => ResponseDelivery.track(response, release, timeouts)),
           // Cancellation waits for any uninterruptible mutation to settle. Do not
           // release merely because the caller's transport has disconnected.
-          Effect.onExit((exit) => (Exit.isFailure(exit) ? Effect.sync(release) : Effect.void)),
+          Effect.onError(() => Effect.sync(release)),
         );
       }),
     );

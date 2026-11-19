@@ -96,7 +96,7 @@ export const serveCommand = Command.make(
       if (assets !== undefined && !(yield* Effect.promise(() => Static.built(assets)))) {
         return yield* new Invalid({
           field: "ui",
-          reason: `${assets} holds no built UI; run \`npm run build:ui\` first, or point --ui-dir at one`,
+          reason: `${uiDir === "" ? "the bundled UI" : uiDir} holds no built UI; run \`npm run build:ui\` first, or point --ui-dir at one`,
         });
       }
       const server = yield* Effect.acquireRelease(

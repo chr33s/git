@@ -31,7 +31,7 @@ describe("aggregate request budgets", () => {
             return new Promise<void>(() => {});
           },
         }),
-        ...{ duplex: "half" },
+        duplex: "half",
       });
       const error = yield* RequestBody.text(request, 8).pipe(
         Effect.flip,
@@ -65,7 +65,7 @@ describe("aggregate request budgets", () => {
           },
           { highWaterMark: 0 },
         ),
-        ...{ duplex: "half" },
+        duplex: "half",
       });
       const response = yield* Protocol.receivePack(request).pipe(
         Effect.provideService(
@@ -158,8 +158,7 @@ describe("aggregate request budgets", () => {
           },
           { highWaterMark: 0 },
         ),
-        // Node requires duplex for streaming request bodies.
-        ...{ duplex: "half" },
+        duplex: "half",
       });
       yield* Protocol.uploadPack(request).pipe(
         Effect.provide(live),

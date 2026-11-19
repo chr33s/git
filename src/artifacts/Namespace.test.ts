@@ -4,8 +4,7 @@
  * Every test resolves `ReadWriteNamespace` from the layer and speaks
  * the same `ReadWriteNamespaceClient` a Worker would — create, list with a
  * cursor, tokens, fork over alternates, import over real smart HTTP from the
- * node host. `RepoClient.raw` failing as a *typed* error is the payoff of
- * `patches/@alchemy.run+cloudflare+2.0.0-beta.84.patch`.
+ * node host. `RepoClient.raw` refusing off-platform use is covered too.
  */
 import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
@@ -255,7 +254,7 @@ describe("Artifacts local provider", () => {
     }),
   );
 
-  it.effect("issues, lists, revokes tokens — and raw fails as a typed error", () =>
+  it.effect("issues, lists, revokes tokens — and raw refuses off-platform use", () =>
     Effect.promise(async () => {
       await run(
         Effect.gen(function* () {
@@ -283,11 +282,9 @@ describe("Artifacts local provider", () => {
           const after = yield* repo.listTokens();
           assert.ok(after.tokens.some((entry) => entry.state === "revoked"));
 
-          // The patched `raw`: a typed failure a caller can handle, not a
-          // throwing Proxy and not a crash.
-          const raw = yield* repo.raw.pipe(Effect.flip);
-          assert.equal(raw._tag, "ArtifactsError");
-          assert.match(raw.message, /off-platform/);
+          // `raw` is an eager `ArtifactsRepo` only the Workers runtime can
+          // produce; the local stand-in throws guidance on first use.
+          assert.throws(() => repo.raw.info(), /off-platform/);
         }),
       );
     }),

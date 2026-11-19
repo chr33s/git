@@ -93,19 +93,17 @@ it("copies paginated real R2 bodies and metadata without replacing destination d
       const oversized = {
         list: async (options: Parameters<R2Bucket["list"]>[0]) => {
           const page = await source.list(options);
-          return {
-            ...page,
+          return Object.assign({}, page, {
             objects: page.objects.map((entry) =>
               entry.key === "repo/snapshot.json"
-                ? {
-                    ...entry,
+                ? Object.assign({}, entry, {
                     size,
                     writeHttpMetadata: (headers: Parameters<R2Object["writeHttpMetadata"]>[0]) =>
                       entry.writeHttpMetadata(headers),
-                  }
+                  })
                 : entry,
             ),
-          };
+          });
         },
         get: (key: string, options: R2GetOptions) => {
           reads++;

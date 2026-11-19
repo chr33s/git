@@ -120,13 +120,13 @@ export const assess = Effect.fn("knowledge.Assistance.assess")(function* (input:
     evidence: input.evidence,
     maximumBytes: input.maximumBytes,
   }).pipe(
-    Effect.flatMap((output) =>
+    Effect.tap((output) =>
       Proposal.validate({
         evidence: input.evidence,
         output,
         roots: input.roots,
         maximumBytes: input.maximumBytes,
-      }).pipe(Effect.as(output)),
+      }),
     ),
     Effect.map((output): Assistance.State => ({ ...pending, state: "complete", output })),
     Effect.orElseSucceed(

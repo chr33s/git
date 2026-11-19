@@ -1,4 +1,4 @@
-import { Config, Effect, Schema } from "effect";
+import { Config, Schema } from "effect";
 import { StorageFailure } from "../git/Error.ts";
 
 export const defaults = 16 * 1024 ** 2;

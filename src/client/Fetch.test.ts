@@ -236,7 +236,7 @@ describe("Fetch", () => {
           });
         }).pipe(
           Effect.provide(stores(path.join(root, "stripped-target"))),
-          Effect.map(() => null),
+          Effect.as(null),
           Effect.catchCause((cause: unknown) => Effect.succeed(String(cause))),
         ),
       ).finally(() => {

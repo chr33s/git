@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
-import { Effect, Result } from "effect";
+import { Effect, Result, Schema } from "effect";
 import * as Ssh from "../crypto/SshSignature.ts";
 import * as Inventory from "../../tools/cloudflare-backup-inventory.ts";
 import type { Position } from "../../tools/cloudflare-backup-auth.ts";
 import { encodeBackupFrame } from "../../tools/cloudflare-backup-codec.ts";
 
-const resources: Inventory.Resources = {
+const resources = {
   namespaceInventorySha256: "1".repeat(64),
   deploymentSha256: "2".repeat(64),
   r2: {
@@ -15,8 +15,8 @@ const resources: Inventory.Resources = {
     contentInventorySha256: "3".repeat(64),
     metadataInventorySha256: "5".repeat(64),
   },
-};
-const position = (sequence: number): Position => ({
+} satisfies Inventory.Resources;
+const position = (sequence: number): Schema.Schema.Type<typeof Position> => ({
   installationId: "installation",
   snapshotId: "snapshot",
   objectId: "object",

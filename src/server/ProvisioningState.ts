@@ -82,7 +82,7 @@ export const make = Effect.fn("ProvisioningState.make")(function* (
   };
   const checkReservation = (reservation: Reservation) => {
     // Programmatic callers must satisfy the same persisted-data contract.
-    Schema.decodeUnknownSync(Reservation)(reservation);
+    Schema.decodeSync(Reservation)(reservation);
   };
   return {
     read: Effect.fn("ProvisioningState.read")((repo: string) => attempt("read", () => read(repo))),

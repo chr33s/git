@@ -27,12 +27,10 @@ for (const phase of ["before-read", "pending-read", "already-aborted"] as const)
         cancel(reason) {
           assert.ok(reason instanceof Invalid);
           cancelled += 1;
-          // A sender cannot hold an uninterruptible mutation open by refusing
-          // to settle its transport cleanup.
           return new Promise<void>(() => {});
         },
       }),
-      ...{ duplex: "half" },
+      duplex: "half",
     });
     if (phase === "already-aborted") controller.abort("private abort reason");
     const upload = open(original, controller.signal);
@@ -73,7 +71,7 @@ it("closes an unread body after a refused request", async () => {
         cancelled += 1;
       },
     }),
-    ...{ duplex: "half" },
+    duplex: "half",
   });
   const upload = open(original, new AbortController().signal);
   upload.close();
@@ -92,7 +90,7 @@ it("preserves source errors and releases the source reader", async () => {
         controller.error(failure);
       },
     }),
-    ...{ duplex: "half" },
+    duplex: "half",
   });
   const upload = open(original, new AbortController().signal);
   await assert.rejects(upload.request.text(), failure);
@@ -110,7 +108,7 @@ it("releases the transport when the consumer cancels its reader", async () => {
         cancelled += 1;
       },
     }),
-    ...{ duplex: "half" },
+    duplex: "half",
   });
   const upload = open(original, new AbortController().signal);
   assert.ok(upload.request.body);
@@ -140,7 +138,7 @@ it("counts pending reads, clears on progress, and excludes consumer backpressure
     new Request("http://host/repo/blob", {
       method: "POST",
       body: source.readable,
-      ...{ duplex: "half" },
+      duplex: "half",
     }),
     new AbortController().signal,
     100,

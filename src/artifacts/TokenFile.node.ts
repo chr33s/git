@@ -56,11 +56,11 @@ export const make = Effect.fn("TokenFile.make")(function* (root: string, factory
     catch: failed,
   }).pipe(
     Effect.flatMap((text) => Schema.decodeEffect(Rows)(text).pipe(Effect.mapError(failed))),
-    Effect.flatMap((rows) =>
-      new Set(rows.map((row) => row.id)).size === rows.length &&
-      new Set(rows.map((row) => row.digest)).size === rows.length
-        ? Effect.succeed(rows)
-        : Effect.fail(failed()),
+    Effect.filterOrFail(
+      (rows) =>
+        new Set(rows.map((row) => row.id)).size === rows.length &&
+        new Set(rows.map((row) => row.digest)).size === rows.length,
+      failed,
     ),
   );
   const persist = (rows: ReadonlyArray<TokenRow>, bounded: boolean) =>

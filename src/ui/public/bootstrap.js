@@ -11,7 +11,7 @@
   try {
     var t = localStorage.getItem("gp-theme");
     if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
-  } catch (_) {
+  } catch {
     // Storage denial falls through to the CSS prefers-color-scheme rule.
   }
 })();

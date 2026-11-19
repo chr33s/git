@@ -6,6 +6,13 @@ import { HttpServerResponse } from "effect/http";
 import { respond } from "./CloudflareRequest.ts";
 
 const secret = "private-token-path-and-body";
+
+/** A request signal, already aborted for `reason` when one is given. */
+const signalFor = (reason?: string) => {
+  const controller = new AbortController();
+  if (reason !== undefined) controller.abort(reason);
+  return controller.signal;
+};
 for (const component of ["CloudflareEdge", "CloudflareHost"] as const) {
   for (const aborted of [false, true]) {
     it.effect(`${component} redacts a failing request (aborted=${aborted})`, () => {
@@ -14,9 +21,11 @@ for (const component of ["CloudflareEdge", "CloudflareHost"] as const) {
         messages.push(JSON.stringify(message));
       });
       return Effect.gen(function* () {
-        const controller = new AbortController();
-        if (aborted) controller.abort(secret);
-        const result = yield* respond(Effect.die(new Error(secret)), controller.signal, component);
+        const result = yield* respond(
+          Effect.die(new Error(secret)),
+          signalFor(aborted ? secret : undefined),
+          component,
+        );
         assert.equal(result.status, aborted ? 499 : 500);
         if (!aborted) assert.equal(result.headers["cache-control"], "no-store");
         assert.equal(messages.length, aborted ? 1 : 2);
@@ -43,7 +52,7 @@ for (const raw of [false, true]) {
           yield* TestClock.adjust(25);
           return response;
         }),
-        new AbortController().signal,
+        signalFor(),
         "CloudflareEdge",
       );
       if (!raw) assert.equal(result, response);
@@ -86,7 +95,7 @@ for (const outcome of ["complete", "failed", "cancelled"] as const) {
       );
       const response = yield* respond(
         Effect.succeed(HttpServerResponse.raw(new Response(source, { status: 200 }))),
-        new AbortController().signal,
+        signalFor(),
         "CloudflareEdge",
       );
       assert.equal(pulls, 0, "telemetry must not pull the response ahead of its consumer");
@@ -135,7 +144,7 @@ it.effect("cancels an unread response without pulling source bytes", () => {
     );
     const response = yield* respond(
       Effect.succeed(HttpServerResponse.raw(new Response(source))),
-      new AbortController().signal,
+      signalFor(),
       "CloudflareHost",
     );
     assert.equal(response.body._tag, "Raw");
@@ -172,16 +181,18 @@ for (const outcome of ["complete", "failed", "defect"] as const) {
             contentType: "application/octet-stream",
           }),
         ),
-        new AbortController().signal,
+        signalFor(),
         "CloudflareEdge",
       );
       assert.equal(response.status, 201);
       assert.equal(response.headers["x-fixture"], "preserved");
       assert.equal(response.body._tag, "Stream");
       if (response.body._tag !== "Stream") return;
-      const result = yield* Stream.runDrain(response.body.stream).pipe(Effect.result);
+      const result = yield* Stream.runDrain(
+        Stream.mapError(response.body.stream, (error) => String(error)),
+      ).pipe(Effect.result);
       assert.equal(result._tag, outcome === "complete" ? "Success" : "Failure");
-      if (result._tag === "Failure") assert.equal(String(result.failure).includes(secret), false);
+      if (result._tag === "Failure") assert.equal(result.failure.includes(secret), false);
       assert.match(
         messages.join(""),
         new RegExp(outcome === "complete" ? "response_body_complete" : "response_body_failed"),

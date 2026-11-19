@@ -45,7 +45,7 @@ export const verifyBackupAdministration = async (
     const command = (command: Request["command"]) =>
       proxy.env.OPERATOR.backup({ objectId, snapshotId, command });
     await assert.rejects(async () =>
-      Schema.decodeUnknownSync(Schema.String)(
+      Schema.decodeSync(Schema.String)(
         await proxy.env.OPERATOR.backup({
           objectId: "malformed",
           snapshotId,
@@ -74,7 +74,7 @@ export const verifyBackupAdministration = async (
     const installationId = "local-backup-operator";
     await command({ _tag: "Start", plan: { objectId, snapshotId, installationId, signer } });
     await assert.rejects(async () =>
-      Schema.decodeUnknownSync(Schema.String)(await command({ _tag: "AbandonCapture" })),
+      Schema.decodeSync(Schema.String)(await command({ _tag: "AbandonCapture" })),
     );
     let inventory = await Effect.runPromise(Inventory.startInventory(installationId, snapshotId));
     const frames: ReadonlyArray<readonly [Position["kind"], string]> = [
@@ -122,10 +122,10 @@ export const verifyBackupAdministration = async (
     // The Alchemy bridge can encode a failed RPC as a non-string envelope.
     // Apply the same string boundary as the archive client before accepting it.
     await assert.rejects(async () =>
-      Schema.decodeUnknownSync(Schema.String)(await command({ _tag: "Release" })),
+      Schema.decodeSync(Schema.String)(await command({ _tag: "Release" })),
     );
     await assert.rejects(async () =>
-      Schema.decodeUnknownSync(Schema.String)(await command({ _tag: "AbandonCapture" })),
+      Schema.decodeSync(Schema.String)(await command({ _tag: "AbandonCapture" })),
     );
     const stillHeld = await stub.fetch(
       "https://fixture/backup-administration-proof/info/refs?service=git-upload-pack",

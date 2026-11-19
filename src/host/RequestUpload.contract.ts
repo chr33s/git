@@ -18,7 +18,7 @@ export const requestUploadContract = (runner: Runner): void => {
               cancelled = true;
             },
           }),
-          ...{ duplex: "half" },
+          duplex: "half",
         }),
         cancellation.signal,
         10,

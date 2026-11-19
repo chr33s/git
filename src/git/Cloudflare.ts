@@ -613,10 +613,9 @@ export const stores = (options: {
 }) =>
   Layer.unwrap(
     Effect.gen(function* () {
-      const capacity = options.capacity ?? (yield* Capacity.configuration().pipe(Effect.orDie));
-      const metadata =
-        options.metadata ?? (yield* MetadataCapacity.configuration().pipe(Effect.orDie));
-      const headBytes = options.headBytes ?? (yield* HeadCapacity.configuration.pipe(Effect.orDie));
+      const capacity = options.capacity ?? (yield* Capacity.configuration());
+      const metadata = options.metadata ?? (yield* MetadataCapacity.configuration());
+      const headBytes = options.headBytes ?? (yield* HeadCapacity.configuration);
       const bucket = Capacity.bounded(options.bucket, options.storage, options.repo, capacity);
       return Layer.mergeAll(
         objectStore(bucket, options.repo),
@@ -626,5 +625,5 @@ export const stores = (options: {
         // included; see `Storage`.
         Layer.succeed(Storage)(options.repo),
       ).pipe(Layer.provideMerge(packStore(bucket, options.repo)));
-    }),
+    }).pipe(Effect.orDie),
   );
