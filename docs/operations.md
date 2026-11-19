@@ -36,9 +36,9 @@ Node distribution with `LICENSE` beside its `bin` directory; it does not fetch
 or substitute a runtime license from another version. Source maps remain build
 inputs to this audit and are not embedded in the executable.
 
-For Shiki 4.5.0, the collector additionally embeds the complete LICENSE/NOTICE
+For Shiki 4.6.0, the collector additionally embeds the complete LICENSE/NOTICE
 files from its locked `tm-grammars@1.32.22` and `tm-themes@1.12.12` catalogs.
-Their pinned provenance and SHA-256 checks live under `tools/licenses/shiki-4.5.0`;
+Their pinned provenance and SHA-256 checks live under `tools/licenses/shiki-4.6.0`;
 missing/altered files or a Shiki version change fail the build until reviewed.
 The inventory includes those supplemental sources and hashes. These catalogs
 may include notices for languages/themes eliminated from a particular bundle.
@@ -134,8 +134,25 @@ the distribution remains a tar archive so executable permissions and the helper
 symlink survive transport. Select the final artifact from a successful tag run,
 recheck the adjacent checksum and installation evidence, and retain it in the
 approved release archive before expiration. This workflow currently builds the
-Linux architecture of its Ubuntu runner. It does not publish a GitHub Release
-or apply platform distribution signing/notarization. A successful remote tagged
+Linux architecture of its Ubuntu runner.
+
+`.github/workflows/release.yml` builds, packages (`tools/package-standalone.ts`)
+and smoke-tests the executable for linux-x64, linux-arm64, darwin-arm64 and
+darwin-x64 on the same tag push (or a manual run naming an existing tag), attests
+the archives, and attaches them with a combined `SHA256SUMS` to a **draft**
+GitHub Release. Publish the draft only after CI on that tag is green; the
+workflow refuses to change assets on a release that is already published.
+
+The macOS executables are signed with a Developer ID (hardened runtime, secure
+timestamp, the V8 JIT entitlements in `tools/macos/entitlements.plist`) and
+notarized, so Gatekeeper accepts a downloaded copy; a bare executable cannot
+staple its ticket, so the first run checks it online. `npm run build:sea` signs
+with the identity named by `MACOS_SIGNING_IDENTITY`, or ad hoc when it is unset.
+The workflow fails without these repository secrets: `MACOS_CERTIFICATE`
+(base64 Developer ID Application `.p12`), `MACOS_CERTIFICATE_PASSWORD`,
+`MACOS_SIGNING_IDENTITY` (e.g. `Developer ID Application: Name (TEAMID)`),
+and an App Store Connect API key for `notarytool`: `APPLE_API_KEY` (base64
+`.p8`), `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`. Linux executables are not signed. A successful remote tagged
 run is still required to qualify the configured provenance path; local checks do
 not establish that an attestation has been issued or verified.
 

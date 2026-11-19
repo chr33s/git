@@ -61,6 +61,13 @@ if ((process.env["NODE_COMPILE_CACHE"] ?? "") === "") {
   }
 }
 
-const { run } = await import("./main.ts");
-
-run();
+// npm links `git-remote-git+id` to this file too; Git launches the helper by
+// that name, so the invoked name (not the resolved file) picks the protocol,
+// as `sea.ts` does with `argv0`.
+if (path.basename(process.argv[1] ?? "").replace(/\.[cm]?[jt]s$/, "") === "git-remote-git+id") {
+  const { run } = await import("./remote-id.node.ts");
+  await run();
+} else {
+  const { run } = await import("./main.ts");
+  run();
+}

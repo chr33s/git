@@ -59,7 +59,7 @@ it.each([
         path.join(directory, "package.json"),
         JSON.stringify({
           name: "@shikijs/langs",
-          version: scenario === "upgrade" ? "4.5.1" : "4.5.0",
+          version: scenario === "upgrade" ? "4.6.1" : "4.6.0",
           license: "MIT",
         }),
       );
@@ -67,7 +67,7 @@ it.each([
       await fs.cp(path.resolve("tools/licenses"), path.join(root, "tools/licenses"), {
         recursive: true,
       });
-      const notice = path.join(root, "tools/licenses/shiki-4.5.0/tm-grammars.NOTICE");
+      const notice = path.join(root, "tools/licenses/shiki-4.6.0/tm-grammars.NOTICE");
       if (scenario === "tampered") await fs.appendFile(notice, "tampered");
       if (scenario === "missing-supplemental") await fs.unlink(notice);
     }

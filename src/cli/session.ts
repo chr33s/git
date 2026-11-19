@@ -707,7 +707,9 @@ const hookScript = (input: {
 }) => {
   const command = [
     process.execPath,
-    ...(isSea() ? [] : [path.resolve(import.meta.dirname, "bin.ts")]),
+    // The entry this process ran: `bin.ts` from a checkout, the bundled
+    // `dist/bin/cli.mjs` from npm — which is not beside the bundled module.
+    ...(isSea() ? [] : [path.resolve(process.argv[1] ?? path.join(import.meta.dirname, "bin.ts"))]),
     "session",
     "hook",
     "--root",

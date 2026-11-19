@@ -153,9 +153,30 @@ fs.writeFileSync(
 
 execFileSync(process.execPath, ["--build-sea", configuration], { stdio: "inherit" });
 // macOS kills an unsigned binary with SIGKILL before it runs a single
-// instruction; an ad-hoc signature is enough.
+// instruction; an ad-hoc signature is enough to run locally. A release names a
+// Developer ID in `MACOS_SIGNING_IDENTITY`: notarization then requires the
+// hardened runtime and a secure timestamp, and V8 under that runtime needs the
+// JIT entitlements in `tools/macos/entitlements.plist`. Signed here, before the
+// checksum below, because signing rewrites the executable.
 if (process.platform === "darwin") {
-  execFileSync("codesign", ["--sign", "-", executable], { stdio: "inherit" });
+  const identity = process.env["MACOS_SIGNING_IDENTITY"] ?? "";
+  execFileSync(
+    "codesign",
+    identity === ""
+      ? ["--force", "--sign", "-", executable]
+      : [
+          "--force",
+          "--sign",
+          identity,
+          "--options",
+          "runtime",
+          "--timestamp",
+          "--entitlements",
+          path.join("tools", "macos", "entitlements.plist"),
+          executable,
+        ],
+    { stdio: "inherit" },
+  );
 }
 const helper = path.join(
   out,

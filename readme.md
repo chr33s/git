@@ -60,8 +60,7 @@ Choose the document for the job rather than reading the design set front to back
 
 The npm package `@chr33s/git` is the Git wire protocol only: SHA-1, object and
 pack codecs, pkt-line framing, the storage ports, typed errors, and a
-receive-pack client that needs no repository. The server, CLI, UI and hub are
-not in it. It is portable (no `node:*`), side-effect free, and depends only on
+receive-pack client that needs no repository. The library is portable (no `node:*`), side-effect free, and depends only on
 `effect`, as a peer.
 
 ```bash
@@ -88,11 +87,15 @@ const push = Effect.gen(function* () {
 ```
 
 Every namespace is also its own entry point (`@chr33s/git/Pkt`,
-`@chr33s/git/Pack`, …). `npm publish` builds `dist/lib` first (`prepack`).
+`@chr33s/git/Pack`, …). `npm publish` builds `dist/lib` and `dist/bin` first (`prepack`).
+
+The package also installs the `git+` and `git-remote-git+id` bins: the CLI
+bundled with its dependencies into `dist/bin` (`npm run build:bin`), run by your
+node (>= 24.12), with the built UI in `dist/ui` for `serve --ui`.
 
 ## Quick start
 
-The CLI and server are not on npm. Install [mise](https://mise.jdx.dev/) and use
+`npm i -g @chr33s/git` installs the CLI. To develop, install [mise](https://mise.jdx.dev/) and use
 the checkout, or a [standalone binary](docs/operations.md#standalone-cli-installation). Node 26 is the
 blessed development and binary-build version; the source compatibility floor is
 Node 24.12.0.

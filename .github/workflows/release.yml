@@ -1,0 +1,191 @@
+name: Release
+
+# Builds the single executable (`npm run build:sea`) on each supported
+# platform for a version tag, packages and verifies it with the same tools CI
+# uses, attests the archives and attaches them to a *draft* GitHub Release.
+# Publishing the draft is a manual step, taken once CI on the same tag is green.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing version tag to (re)build, e.g. v2.0.0"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: SEA ${{ matrix.target }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: linux-x64
+            runner: ubuntu-latest
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+          - target: darwin-arm64
+            runner: macos-latest
+          - target: darwin-x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          # The executable embeds this runtime; build and verify with the same one.
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      # A release ships Developer ID–signed, notarized macOS executables, so a
+      # downloaded copy passes Gatekeeper. The certificate lives only in a
+      # throwaway keychain outside the checkout (a file in it would make the
+      # build dirty) and is deleted when the job ends.
+      - name: Import Developer ID certificate
+        if: runner.os == 'macOS'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          for name in MACOS_CERTIFICATE MACOS_CERTIFICATE_PASSWORD MACOS_SIGNING_IDENTITY; do
+            test -n "${!name}" || { echo "::error::secret $name is not set"; exit 1; }
+          done
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password="$(openssl rand -hex 24)"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" \
+            -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
+          # Keep the existing search list; its entries are space-free paths.
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          security find-identity -v -p codesigning "$keychain" | grep -F "$MACOS_SIGNING_IDENTITY"
+      - run: npm run build:sea
+        env:
+          # Read by sea.build.ts on darwin only; empty elsewhere.
+          MACOS_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && secrets.MACOS_SIGNING_IDENTITY || '' }}
+      - name: Check the executable matches its runner
+        run: test "$(node -p 'process.platform + "-" + process.arch')" = "${{ matrix.target }}"
+      - name: Verify Developer ID signature
+        if: runner.os == 'macOS'
+        run: |
+          codesign --verify --strict --verbose=2 dist/sea/git+
+          details="$(codesign --display --verbose=4 dist/sea/git+ 2>&1)"
+          echo "$details"
+          grep -q "^Authority=Developer ID Application:" <<<"$details"
+          grep -q "^Timestamp=" <<<"$details"
+          grep -Eq "flags=0x[0-9a-f]+\(runtime\)" <<<"$details"
+      # A bare executable cannot carry a stapled ticket; Gatekeeper fetches it
+      # from Apple on first run. Submitted as a zip, which leaves the binary's
+      # bytes (and so every checksum) unchanged.
+      - name: Notarize
+        if: runner.os == 'macOS'
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          for name in APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER; do
+            test -n "${!name}" || { echo "::error::secret $name is not set"; exit 1; }
+          done
+          key="$RUNNER_TEMP/AuthKey_$APPLE_API_KEY_ID.p8"
+          echo "$APPLE_API_KEY" | base64 --decode > "$key"
+          ditto -c -k --keepParent dist/sea/git+ "$RUNNER_TEMP/git+.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/git+.zip" \
+            --key "$key" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" \
+            --wait --timeout 30m --output-format json > "$RUNNER_TEMP/notary.json"
+          rm -f "$key"
+          cat "$RUNNER_TEMP/notary.json"
+          test "$(node -p 'require(process.argv[1]).status' "$RUNNER_TEMP/notary.json")" = "Accepted"
+      - name: Remove signing keychain
+        if: always() && runner.os == 'macOS'
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
+      # Verifies the tag names HEAD, the checkout was clean, and the embedded
+      # metadata, checksum and version agree before packaging.
+      - run: node tools/package-standalone.ts
+      - name: Smoke test the extracted archive
+        run: |
+          archives=(dist/releases/git-plus-*-${{ matrix.target }}.tar.gz)
+          test "${#archives[@]}" -eq 1
+          (cd dist/releases && shasum -a 256 -c "$(basename "${archives[0]}").sha256")
+          scratch="$(mktemp -d)"
+          tar -xzf "${archives[0]}" -C "$scratch"
+          installed=("$scratch"/git-plus-*)
+          (cd "${installed[0]}" && shasum -a 256 -c CONTENTS.sha256)
+          "${installed[0]}/git+" --version
+          "${installed[0]}/git+" --build-info
+      - uses: actions/upload-artifact@v6
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            dist/releases/*.tar.gz
+            dist/releases/*.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Draft GitHub Release
+    needs: build
+    if: github.repository == 'chr33s/git'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/download-artifact@v6
+        with:
+          pattern: release-*
+          path: dist/releases
+          merge-multiple: true
+      - name: Verify downloaded archives
+        working-directory: dist/releases
+        run: |
+          version="$(node -p 'require("../../package.json").version')"
+          tag="${{ inputs.tag || github.ref_name }}"
+          test "$tag" = "v$version"
+          for target in linux-x64 linux-arm64 darwin-arm64 darwin-x64; do
+            test -f "git-plus-$version-$target.tar.gz"
+          done
+          sha256sum -c ./*.sha256
+          cat ./*.sha256 > SHA256SUMS
+      - name: Attest archives
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/releases/*.tar.gz
+      - name: Create or update the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          files=(dist/releases/*.tar.gz dist/releases/*.tar.gz.sha256 dist/releases/SHA256SUMS)
+          if draft="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            # Never replace assets on a release people may already have downloaded.
+            test "$draft" = "true" || { echo "::error::$TAG is already published"; exit 1; }
+            gh release upload "$TAG" "${files[@]}" --clobber
+          else
+            gh release create "$TAG" "${files[@]}" \
+              --draft \
+              --verify-tag \
+              --title "$TAG" \
+              --generate-notes
+          fi

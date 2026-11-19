@@ -1,11 +1,19 @@
 {
   "name": "@chr33s/git",
-  "version": "2.0.0",
+  "version": "2.0.0-alpha.1",
   "description": "Git wire protocol for Effect: hashing, object and pack codecs, pkt-line framing, storage ports and a receive-pack client",
   "license": "MIT",
+  "bin": {
+    "git+": "dist/bin/cli.mjs",
+    "git-remote-git+id": "dist/bin/cli.mjs"
+  },
   "files": [
     "dist/lib",
-    "!dist/lib/**/*.tsbuildinfo"
+    "!dist/lib/**/*.tsbuildinfo",
+    "dist/bin",
+    "dist/ui",
+    "!dist/bin/**/*.map",
+    "!dist/ui/**/*.map"
   ],
   "type": "module",
   "sideEffects": [
@@ -80,9 +88,11 @@
     "./package.json": "./package.json"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "tag": "next"
   },
   "scripts": {
+    "build:bin": "node tools/generate-version.ts && npm run build:ui && node src/cli/bin.build.ts",
     "build:lib": "node -e \"fs.rmSync('dist/lib',{recursive:true,force:true})\" && tsc -p tsconfig.lib.json && node tools/annotate-pure.ts dist/lib",
     "build:sea": "npm run codegen && npm run build:ui && node src/cli/sea.build.ts",
     "build:ui": "vp build",
@@ -93,7 +103,7 @@
     "docs:cli": "node tools/cli-docs.ts",
     "docs:cli:check": "node tools/cli-docs.ts --check",
     "fix": "vp lint --fix && vp fmt",
-    "prepack": "npm run build:lib",
+    "prepack": "npm run build:lib && npm run build:bin",
     "prepare": "patch-package && effect-tsgo patch --tsrs --oxlint",
     "setup": "npm run codegen",
     "test": "vp test run",

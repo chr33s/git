@@ -4,12 +4,22 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import assert from "node:assert/strict";
 
+/**
+ * `bundle` is the directory whose top-level source maps are inventoried and
+ * where the notices land. `runtime` is false for a bundle the user's own node
+ * runs (`dist/bin`), which embeds no Node to attribute.
+ */
 export const writeReleaseNotices = (
   nodeLicense = path.resolve(path.dirname(fs.realpathSync(process.execPath)), "..", "LICENSE"),
+  bundle = "dist/sea",
+  runtime = true,
 ) => {
   const directories = new Set<string>();
   const maps = [
-    "dist/sea/main.mjs.map",
+    ...fs
+      .readdirSync(bundle)
+      .filter((file) => file.endsWith(".map"))
+      .map((file) => path.join(bundle, file)),
     ...fs
       .readdirSync("dist/ui", { recursive: true })
       .map(String)
@@ -77,7 +87,7 @@ export const writeReleaseNotices = (
     const supplemental = [];
     if (manifest.name === "@shikijs/langs" || manifest.name === "@shikijs/themes") {
       const entries = JSON.parse(
-        fs.readFileSync("tools/licenses/shiki-4.5.0/provenance.json", "utf8"),
+        fs.readFileSync("tools/licenses/shiki-4.6.0/provenance.json", "utf8"),
       );
       const entry = entries.find((item: { package: string }) => item.package === manifest.name);
       assert.ok(entry, `Missing supplemental notices for ${manifest.name}`);
@@ -112,9 +122,11 @@ export const writeReleaseNotices = (
   });
   // Official Node binary distributions include the runtime and bundled-library
   // notices here. Fail rather than silently shipping only Node's MIT heading.
-  const runtimeNotice = fs.readFileSync(nodeLicense, "utf8");
-  if (!runtimeNotice.includes("Node.js")) throw new Error("Unexpected Node runtime license file");
-  notices.push(`===== Node.js ${process.versions.node} — LICENSE =====\n\n${runtimeNotice}\n`);
+  const runtimeNotice = runtime ? fs.readFileSync(nodeLicense, "utf8") : undefined;
+  if (runtimeNotice !== undefined) {
+    if (!runtimeNotice.includes("Node.js")) throw new Error("Unexpected Node runtime license file");
+    notices.push(`===== Node.js ${process.versions.node} — LICENSE =====\n\n${runtimeNotice}\n`);
+  }
   const patches = fs
     .readdirSync("patches")
     .filter((file) => file.endsWith(".patch"))
@@ -130,17 +142,23 @@ export const writeReleaseNotices = (
     scope:
       "Source-map package inventory plus static fonts, raw SVG icons and embedded Node; includes mapped code even when partially eliminated. Review supplemental attribution requirements before publication.",
     packages: inventory,
-    node: {
-      version: process.versions.node,
-      licenseSha256: createHash("sha256").update(runtimeNotice).digest("hex"),
-    },
+    node:
+      runtimeNotice === undefined
+        ? null
+        : {
+            version: process.versions.node,
+            licenseSha256: createHash("sha256").update(runtimeNotice).digest("hex"),
+          },
     patches,
   };
-  fs.writeFileSync("dist/sea/THIRD_PARTY_NOTICES.txt", notices.join("\n"));
-  fs.copyFileSync("LICENSE", "dist/sea/LICENSE");
-  fs.writeFileSync("dist/sea/dependency-inventory.json", `${JSON.stringify(metadata, null, 2)}\n`);
+  fs.writeFileSync(path.join(bundle, "THIRD_PARTY_NOTICES.txt"), notices.join("\n"));
+  fs.copyFileSync("LICENSE", path.join(bundle, "LICENSE"));
+  fs.writeFileSync(
+    path.join(bundle, "dependency-inventory.json"),
+    `${JSON.stringify(metadata, null, 2)}\n`,
+  );
   console.info(
-    `Collected notices for ${inventory.length} packages and Node ${process.versions.node}.`,
+    `Collected notices for ${inventory.length} packages${runtimeNotice === undefined ? "" : ` and Node ${process.versions.node}`}.`,
   );
 };
 
