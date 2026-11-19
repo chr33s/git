@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-The current `0.1.x` development line is prerelease software and is not
+The current `2.0.x` development line is prerelease software and is not
 production-qualified. There is no published stable release or established
 backport/support window. Report issues against the current source revision and
 include the exact commit or executable build information. Production support

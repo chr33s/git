@@ -62,7 +62,7 @@ An operator whose key holds `member.invite` (or `repo.admin`) records the
 grant in the trust log:
 
 ```sh
-npx git+ hub grant my-repo --key ~/.ssh/hub \
+git+ hub grant my-repo --key ~/.ssh/hub \
   --subject ~/.ssh/agent-claude.pub \
   --capability repo.read,source.push,hub.create-pr,hub.comment \
   --expires-in 7776000   # 90 days
@@ -103,7 +103,7 @@ An agent authenticates by proving possession of its private key. For stock
 delegated credential signed by the agent's own key:
 
 ```sh
-TOKEN=$(npx git+ credential my-repo \
+TOKEN=$(git+ credential my-repo \
   --key ~/.ssh/agent-claude \
   --capability repo.read,source.push \
   --ttl 3600)
@@ -303,17 +303,17 @@ Rotation while everything is healthy is cheap — grant the new key, then
 revoke the old one with the reason that says what happened:
 
 ```sh
-npx git+ hub grant my-repo --key ~/.ssh/hub \
+git+ hub grant my-repo --key ~/.ssh/hub \
   --subject ~/.ssh/agent-claude-2.pub --capability repo.read,source.push \
   --expires-in 7776000
-npx git+ hub revoke my-repo --key ~/.ssh/hub \
+git+ hub revoke my-repo --key ~/.ssh/hub \
   --subject SHA256:oldkeyfingerprint --reason rotated
 ```
 
 A leaked key is the other reason per-agent keys exist:
 
 ```sh
-npx git+ hub revoke my-repo --key ~/.ssh/hub \
+git+ hub revoke my-repo --key ~/.ssh/hub \
   --subject SHA256:leakedfingerprint --reason compromised
 ```
 
@@ -1351,9 +1351,9 @@ member:
 
 ```sh
 ssh-keygen -t ed25519 -f ~/.ssh/hub -N ""
-npx git+ init project
-npx git+ hub init project --key ~/.ssh/hub     # genesis, RepoID; 1-of-1 seeds repo.admin
-npx git+ serve &
+git+ init project
+git+ hub init project --key ~/.ssh/hub     # genesis, RepoID; 1-of-1 seeds repo.admin
+git+ serve &
 ```
 
 For a shared repository, `hub init --key … --key … --threshold 2` bootstraps
@@ -1379,15 +1379,15 @@ ssh-keygen -t ed25519 -f ~/.ssh/agent-claude -N "" -C "claude@agents.example.com
 ssh-keygen -t ed25519 -f ~/.ssh/agent-codex  -N "" -C "codex@agents.example.com"
 ssh-keygen -t ed25519 -f ~/.ssh/agent-ci     -N "" -C "ci@agents.example.com"
 
-npx git+ hub grant project --key ~/.ssh/hub \
+git+ hub grant project --key ~/.ssh/hub \
   --subject ~/.ssh/agent-claude.pub \
   --capability repo.read,source.push,hub.create-pr,hub.comment,hub.session \
   --expires-in 7776000
-npx git+ hub grant project --key ~/.ssh/hub \
+git+ hub grant project --key ~/.ssh/hub \
   --subject ~/.ssh/agent-codex.pub \
   --capability repo.read,source.push,hub.create-pr,hub.comment,hub.session \
   --expires-in 7776000
-npx git+ hub grant project --key ~/.ssh/hub \
+git+ hub grant project --key ~/.ssh/hub \
   --subject ~/.ssh/agent-ci.pub \
   --capability repo.read,hub.check:test --expires-in 7776000
 ```
@@ -1442,7 +1442,7 @@ Clone with a self-minted credential, work on a branch, commit with the
 session trailer:
 
 ```sh
-TOKEN=$(npx git+ credential project --key ~/.ssh/agent-claude \
+TOKEN=$(git+ credential project --key ~/.ssh/agent-claude \
   --capability repo.read,source.push --ttl 3600)
 export GIT_AUTH_TOKEN="$TOKEN"
 git -c credential.helper= \
@@ -1479,7 +1479,7 @@ Opening the pull request is one more signed event, a `pr.opened` at the
 root of `refs/hub/pr/P`:
 
 ```sh
-npx git+ pr open project --key ~/.ssh/agent-claude \
+git+ pr open project --key ~/.ssh/agent-claude \
   --title "…" --base main --head claude/agent-keys
 ```
 
@@ -1524,7 +1524,7 @@ The session outlived its author's sandbox because it was pushed. Codex,
 asked to finish related work, reads before it writes:
 
 ```sh
-TOKEN=$(npx git+ credential project --key ~/.ssh/agent-codex \
+TOKEN=$(git+ credential project --key ~/.ssh/agent-codex \
   --capability repo.read,source.push --ttl 3600)
 git+ session show --repo project --branch claude/agent-keys
 ```
@@ -1562,7 +1562,7 @@ provenance §11).
 An agent key leaks:
 
 ```sh
-npx git+ hub revoke project --key ~/.ssh/hub \
+git+ hub revoke project --key ~/.ssh/hub \
   --subject SHA256:claudefingerprint --reason compromised
 ```
 

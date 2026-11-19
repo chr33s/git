@@ -73,6 +73,10 @@ export interface CommitInfo {
 }
 
 export interface TreeEntry {
+  /**
+   * Written exactly as given, so it is part of the tree's hash. git writes a
+   * subtree as `40000`; `040000` reads as the same mode but hashes differently.
+   */
   readonly mode: string;
   readonly name: string;
   readonly oid: Oid;

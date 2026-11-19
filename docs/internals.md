@@ -50,6 +50,22 @@ Retain these regressions when upgrading or removing the patch.
 Overrides align Foldkit's exact Effect 4.0.0 peers with Effect 4.1.4 and make
 all Vite consumers use Vite+'s core to share one module registry.
 
+### The published package
+
+`@chr33s/git` on npm is `src/index.ts` compiled to `dist/lib` — the protocol
+modules and nothing of the app. The root manifest is that package's manifest:
+`files` ships only `dist/lib`, `exports` names the barrel and each namespace,
+and `effect` is a peer whose range is `^` this repository's pin. The app's
+dependencies are all development dependencies, so installing the package pulls
+in nothing but the peer. `sideEffects` lists `src/**` and `tools/**`, which
+leaves the app's own builds unchanged while `dist/lib` is side-effect free.
+`src/Library.test.ts` asserts the library's import graph file by file, the
+exports map, and the peer range; adding a module to the package is a change to
+that test. `npm publish` runs `prepack`, which rebuilds `dist/lib`;
+`tools/annotate-pure.ts` then marks its module-level calls `/*#__PURE__*/`, so a
+bundler drops what a consumer does not import — a push-only bundle carries no
+inflater.
+
 Oxlint `typeCheck` and `tsc` both run in `npm run check`; Effect rules live in Oxlint, not `tsc` (`diagnostics: false`).
 Foldkit's `@foldkit/oxlint-plugin` is loaded the same way, scoped to the UI's
 TEA files (`src/ui/app*.ts`, views, mounts, controls).
@@ -92,6 +108,8 @@ TEA files (`src/ui/app*.ts`, views, mounts, controls).
 | `src/host/Cloudflare.ts`                                                                   | the Workers host                                                                                      |
 | `src/client/Fetch.ts`                                                                      | smart-HTTP fetch client: `lsRemote`, clone, incremental fetch                                         |
 | `src/client/Push.ts`                                                                       | smart-HTTP push client                                                                                |
+| `src/client/Wire.ts`                                                                       | receive-pack on the wire, no `Repository`: `discover`, `receivePack`, `pushObjects`                   |
+| `src/index.ts`                                                                             | the npm package: protocol namespaces only, built by `tsconfig.lib.json`                               |
 | `src/client/Client.ts`                                                                     | browser client: derived JSON client, clone, local `Repository`                                        |
 | `src/cli/bin.ts`                                                                           | `bin`: node's compile cache on, then `main.ts`                                                        |
 | `src/cli/main.ts`                                                                          | CLI: porcelain, hub, social, queue, session, task, wake                                               |

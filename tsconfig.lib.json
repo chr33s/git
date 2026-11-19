@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "declaration": true,
+    "lib": ["ES2024", "DOM"],
+    "noEmit": false,
+    "outDir": "dist/lib",
+    "rewriteRelativeImportExtensions": true,
+    "rootDir": "src",
+    "types": []
+  },
+  "files": ["src/index.ts"],
+  "include": []
+}

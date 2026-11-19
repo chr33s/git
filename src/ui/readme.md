@@ -239,7 +239,7 @@ same route boundary: Vite serves source modules during development, while
 `serve --ui` and the Worker serve `dist/ui` after a finished build:
 
 ```bash
-npm run build:ui && npx git+ serve --ui
+npm run build:ui && git+ serve --ui
 ```
 
 Deployed, it is the same shape again: the Worker serves both the page and the

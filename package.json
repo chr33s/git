@@ -1,33 +1,99 @@
 {
   "name": "@chr33s/git",
-  "version": "0.2.0",
-  "private": true,
-  "description": "Universal Git smart-HTTP protocol server, browser client & nix cli",
+  "version": "2.0.0",
+  "description": "Git wire protocol for Effect: hashing, object and pack codecs, pkt-line framing, storage ports and a receive-pack client",
   "license": "MIT",
-  "bin": {
-    "git+": "./src/cli/bin.ts",
-    "git-remote-git+id": "./src/cli/remote-id.node.ts"
-  },
   "files": [
-    "src",
-    "tsconfig.json",
-    "!src/**/*.test.ts",
-    "!src/**/*.integration.ts",
-    "!src/**/*.contract.ts",
-    "!src/**/*.build.ts"
+    "dist/lib",
+    "!dist/lib/**/*.tsbuildinfo"
   ],
   "type": "module",
+  "sideEffects": [
+    "./src/**",
+    "./tools/**"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/lib/index.d.ts",
+      "default": "./dist/lib/index.js"
+    },
+    "./Authorize": {
+      "types": "./dist/lib/client/Authorize.d.ts",
+      "default": "./dist/lib/client/Authorize.js"
+    },
+    "./Errors": {
+      "types": "./dist/lib/git/Error.d.ts",
+      "default": "./dist/lib/git/Error.js"
+    },
+    "./Format": {
+      "types": "./dist/lib/git/Format.d.ts",
+      "default": "./dist/lib/git/Format.js"
+    },
+    "./Inflate": {
+      "types": "./dist/lib/git/Inflate.d.ts",
+      "default": "./dist/lib/git/Inflate.js"
+    },
+    "./Oid": {
+      "types": "./dist/lib/git/Oid.d.ts",
+      "default": "./dist/lib/git/Oid.js"
+    },
+    "./Pack": {
+      "types": "./dist/lib/git/Pack.d.ts",
+      "default": "./dist/lib/git/Pack.js"
+    },
+    "./PackFile": {
+      "types": "./dist/lib/git/PackFile.d.ts",
+      "default": "./dist/lib/git/PackFile.js"
+    },
+    "./PackIndex": {
+      "types": "./dist/lib/git/PackIndex.d.ts",
+      "default": "./dist/lib/git/PackIndex.js"
+    },
+    "./Packed": {
+      "types": "./dist/lib/git/Packed.d.ts",
+      "default": "./dist/lib/git/Packed.js"
+    },
+    "./Pkt": {
+      "types": "./dist/lib/git/Pkt.d.ts",
+      "default": "./dist/lib/git/Pkt.js"
+    },
+    "./Refspec": {
+      "types": "./dist/lib/git/Refspec.d.ts",
+      "default": "./dist/lib/git/Refspec.js"
+    },
+    "./Sha1": {
+      "types": "./dist/lib/git/Sha1.d.ts",
+      "default": "./dist/lib/git/Sha1.js"
+    },
+    "./Store": {
+      "types": "./dist/lib/git/Store.d.ts",
+      "default": "./dist/lib/git/Store.js"
+    },
+    "./Transport": {
+      "types": "./dist/lib/client/Transport.d.ts",
+      "default": "./dist/lib/client/Transport.js"
+    },
+    "./Wire": {
+      "types": "./dist/lib/client/Wire.d.ts",
+      "default": "./dist/lib/client/Wire.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
+    "build:lib": "node -e \"fs.rmSync('dist/lib',{recursive:true,force:true})\" && tsc -p tsconfig.lib.json && node tools/annotate-pure.ts dist/lib",
     "build:sea": "npm run codegen && npm run build:ui && node src/cli/sea.build.ts",
     "build:ui": "vp build",
     "build:ui:debug": "vp build --mode development",
     "check": "vp fmt --check && vp lint && npm run docs:cli:check",
     "codegen": "node tools/generate-version.ts && wrangler types -c wrangler.test.json",
     "dev:ui": "node src/ui/dev.ts",
-    "watch:ui": "vp build --watch",
     "docs:cli": "node tools/cli-docs.ts",
     "docs:cli:check": "node tools/cli-docs.ts --check",
     "fix": "vp lint --fix && vp fmt",
+    "prepack": "npm run build:lib",
     "prepare": "patch-package && effect-tsgo patch --tsrs --oxlint",
     "setup": "npm run codegen",
     "test": "vp test run",
@@ -35,11 +101,8 @@
     "test:interop": "vp test run --project interop",
     "test:unit": "vp test run --project unit",
     "verify:ui": "npm run build:ui && node src/ui/verify.ts",
-    "verify:worker": "node tools/verify-worker.ts"
-  },
-  "dependencies": {
-    "effect": "4.1.4",
-    "ignore": "7.0.16"
+    "verify:worker": "node tools/verify-worker.ts",
+    "watch:ui": "vp build --watch"
   },
   "devDependencies": {
     "@alchemy.run/cloudflare": "2.0.0-beta.87",
@@ -61,7 +124,9 @@
     "@types/node": "26.6.6",
     "alchemy": "2.0.0-beta.87",
     "devalue": "6.0.3",
+    "effect": "4.1.4",
     "foldkit": "0.171.0",
+    "ignore": "7.0.16",
     "miniflare": "5.20261023.2-beta",
     "oxlint-tsgolint": "7.0.2007",
     "patch-package": "8.0.1",
@@ -71,6 +136,9 @@
     "vite-plus": "1.7.0",
     "vitest": "5.1.0",
     "wrangler": "4.165.0"
+  },
+  "peerDependencies": {
+    "effect": "^4.1.4"
   },
   "overrides": {
     "@effect/platform-browser": "4.1.4",

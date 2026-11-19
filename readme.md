@@ -1,6 +1,3 @@
-> [!WARNING]  
-> Pre-1.0 API: unstable and not recommended for production use.
-
 # @chr33s/git
 
 > **Universal AI-native Git smart-HTTP server, browser client & Unix CLI**  
@@ -59,10 +56,44 @@ Choose the document for the job rather than reading the design set front to back
 
 ---
 
+## Library
+
+The npm package `@chr33s/git` is the Git wire protocol only: SHA-1, object and
+pack codecs, pkt-line framing, the storage ports, typed errors, and a
+receive-pack client that needs no repository. The server, CLI, UI and hub are
+not in it. It is portable (no `node:*`), side-effect free, and depends only on
+`effect`, as a peer.
+
+```bash
+npm install @chr33s/git effect
+```
+
+```ts
+import { Effect } from "effect";
+import { Format } from "@chr33s/git";
+import { pushObjects } from "@chr33s/git/Wire";
+
+const push = Effect.gen(function* () {
+  // blob, tree and commit built with Format.encodeTree / Format.encodeCommit
+  const oid = yield* Format.hashObject(commit);
+  // `objects` is everything the remote lacks; nothing is walked.
+  return yield* pushObjects({
+    url,
+    token,
+    ref: "refs/heads/main",
+    oid,
+    objects: [blob, tree, commit],
+  });
+});
+```
+
+Every namespace is also its own entry point (`@chr33s/git/Pkt`,
+`@chr33s/git/Pack`, …). `npm publish` builds `dist/lib` first (`prepack`).
+
 ## Quick start
 
-This repository is currently **not published to npm** (`package.json` is private).
-Install [mise](https://mise.jdx.dev/) and use the checkout instead. Node 26 is the
+The CLI and server are not on npm. Install [mise](https://mise.jdx.dev/) and use
+the checkout, or a [standalone binary](docs/operations.md#standalone-cli-installation). Node 26 is the
 blessed development and binary-build version; the source compatibility floor is
 Node 24.12.0.
 
