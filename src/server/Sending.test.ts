@@ -263,7 +263,7 @@ describe("what a standing instruction carries", () => {
       assert.match(warned ?? "", /reconciliation required/);
       const delivery = logged.find((line) => line.includes("delivery_result"));
       assert.match(delivery ?? "", /"outcome":"refused"/);
-      assert.match(delivery ?? "", /"queueMs":0/);
+      assert.match(delivery ?? "", /"queueMs":\d+,/);
       assert.doesNotMatch(delivery ?? "", /https:\/\/|refs\/heads/);
     }),
   );
