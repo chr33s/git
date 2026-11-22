@@ -3,6 +3,10 @@
   "version": "2.0.0-alpha.2",
   "description": "Git wire protocol for Effect: hashing, object and pack codecs, pkt-line framing, storage ports and a receive-pack client",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chr33s/git.git"
+  },
   "bin": {
     "git+": "dist/bin/cli.mjs",
     "git-remote-git+id": "dist/bin/cli.mjs"

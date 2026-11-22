@@ -35,6 +35,9 @@ export const gitEnv: NodeJS.ProcessEnv = {
   GIT_CONFIG_SYSTEM: "/dev/null",
   // Not merely absent: set, so nothing falls back to $HOME/.gitconfig.
   GIT_CONFIG_NOSYSTEM: "1",
+  // Disable detached background maintenance/gc so a `git commit` does not leave
+  // a transient `.git/objects/maintenance.lock` racing with recursive `fs.cp`.
+  GIT_CONFIG_PARAMETERS: "'maintenance.auto=false' 'gc.auto=0'",
   // The same throwaway identity `gitIn` passes as `-c` flags, for the suites
   // that spawn `git merge` themselves with only this env. With every config
   // file pointed at nothing, git falls back to the account's gecos name — set

@@ -31,6 +31,7 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: node tools/release-preflight.ts source
       - run: npm run test:unit -- --reporter=default --reporter=./tools/release-test-reporter.ts
+      - run: npm run build:ui
       - run: npm run verify:worker -- "$RUNNER_TEMP/worker-bundle.json"
       - uses: actions/upload-artifact@v6
         with:
