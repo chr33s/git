@@ -1,9 +1,9 @@
 /**
- * The published package is the protocol, and only the protocol.
+ * The published package is the portable Git core, and only the portable core.
  *
  * `src/index.ts` is what npm ships (compiled by `tsconfig.lib.json`); the app
  * — server, CLI, UI, hub — stays in this repository. Nothing stops an import
- * from quietly pulling `Repository` or `hub/` into the library's graph except
+ * from quietly pulling `hub/` or `node:*` into the library's graph except
  * a check, so the graph is asserted file by file: growing it is a decision
  * somebody makes here, not a side effect of a refactor.
  */
@@ -51,18 +51,28 @@ const closure = (entry: string) => {
 };
 
 describe("the published library", () => {
-  it.effect("reaches only protocol modules, and only effect", () =>
+  it.effect("reaches only portable git modules, and only effect", () =>
     Effect.sync(() => {
       const { files, packages } = closure("src/index.ts");
       assert.deepEqual(packages, ["effect"]);
       assert.deepEqual(files, [
         "src/client/Authorize.ts",
+        "src/client/Fetch.ts",
         "src/client/Transport.ts",
         "src/client/Upload.ts",
         "src/client/Wire.ts",
+        "src/git/Checkout.ts",
+        "src/git/Diff.ts",
         "src/git/Error.ts",
         "src/git/Format.ts",
+        "src/git/History.ts",
+        "src/git/Index.ts",
         "src/git/Inflate.ts",
+        "src/git/LinearRegex.ts",
+        "src/git/Maintenance.ts",
+        "src/git/Memory.ts",
+        "src/git/Merge.ts",
+        "src/git/MergeState.ts",
         "src/git/Oid.ts",
         "src/git/Pack.ts",
         "src/git/PackFile.ts",
@@ -70,8 +80,12 @@ describe("the published library", () => {
         "src/git/Packed.ts",
         "src/git/Pkt.ts",
         "src/git/Refspec.ts",
+        "src/git/Repository.ts",
+        "src/git/Search.ts",
         "src/git/Sha1.ts",
         "src/git/Store.ts",
+        "src/git/TraversalBudget.ts",
+        "src/git/Work.ts",
         "src/index.ts",
       ]);
     }),

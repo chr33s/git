@@ -29,17 +29,49 @@
       "types": "./dist/lib/client/Authorize.d.ts",
       "default": "./dist/lib/client/Authorize.js"
     },
+    "./Checkout": {
+      "types": "./dist/lib/git/Checkout.d.ts",
+      "default": "./dist/lib/git/Checkout.js"
+    },
+    "./Diff": {
+      "types": "./dist/lib/git/Diff.d.ts",
+      "default": "./dist/lib/git/Diff.js"
+    },
     "./Errors": {
       "types": "./dist/lib/git/Error.d.ts",
       "default": "./dist/lib/git/Error.js"
+    },
+    "./Fetch": {
+      "types": "./dist/lib/client/Fetch.d.ts",
+      "default": "./dist/lib/client/Fetch.js"
     },
     "./Format": {
       "types": "./dist/lib/git/Format.d.ts",
       "default": "./dist/lib/git/Format.js"
     },
+    "./History": {
+      "types": "./dist/lib/git/History.d.ts",
+      "default": "./dist/lib/git/History.js"
+    },
+    "./Index": {
+      "types": "./dist/lib/git/Index.d.ts",
+      "default": "./dist/lib/git/Index.js"
+    },
     "./Inflate": {
       "types": "./dist/lib/git/Inflate.d.ts",
       "default": "./dist/lib/git/Inflate.js"
+    },
+    "./Memory": {
+      "types": "./dist/lib/git/Memory.d.ts",
+      "default": "./dist/lib/git/Memory.js"
+    },
+    "./Merge": {
+      "types": "./dist/lib/git/Merge.d.ts",
+      "default": "./dist/lib/git/Merge.js"
+    },
+    "./MergeState": {
+      "types": "./dist/lib/git/MergeState.d.ts",
+      "default": "./dist/lib/git/MergeState.js"
     },
     "./Oid": {
       "types": "./dist/lib/git/Oid.d.ts",
@@ -69,6 +101,14 @@
       "types": "./dist/lib/git/Refspec.d.ts",
       "default": "./dist/lib/git/Refspec.js"
     },
+    "./Repository": {
+      "types": "./dist/lib/git/Repository.d.ts",
+      "default": "./dist/lib/git/Repository.js"
+    },
+    "./Search": {
+      "types": "./dist/lib/git/Search.d.ts",
+      "default": "./dist/lib/git/Search.js"
+    },
     "./Sha1": {
       "types": "./dist/lib/git/Sha1.d.ts",
       "default": "./dist/lib/git/Sha1.js"
@@ -84,6 +124,10 @@
     "./Wire": {
       "types": "./dist/lib/client/Wire.d.ts",
       "default": "./dist/lib/client/Wire.js"
+    },
+    "./Work": {
+      "types": "./dist/lib/git/Work.d.ts",
+      "default": "./dist/lib/git/Work.js"
     },
     "./package.json": "./package.json"
   },
