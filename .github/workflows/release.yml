@@ -3,7 +3,7 @@ name: Release
 # Builds the single executable (`npm run build:sea`) on each supported
 # platform for a version tag, packages and verifies it with the same tools CI
 # uses, attests the archives and attaches them to a *draft* GitHub Release.
-# Publishing the draft is a manual step, taken once CI on the same tag is green.
+# Publishing the draft is a manual step, taken once CI on the tagged commit is green.
 # The npm package is packed once; that tarball is attached to the release and
 # is the exact file published with trusted publishing (OIDC) behind the `npm`
 # environment.

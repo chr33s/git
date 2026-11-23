@@ -145,7 +145,7 @@
     "build:sea": "npm run codegen && npm run build:ui && node src/cli/sea.build.ts",
     "build:ui": "vp build",
     "build:ui:debug": "vp build --mode development",
-    "check": "vp fmt --check && vp lint && npm run docs:cli:check",
+    "check": "vp fmt --check && vp lint && npm run docs:cli:check && node tools/generate-version.ts --check",
     "codegen": "node tools/generate-version.ts && wrangler types -c wrangler.test.json",
     "dev:ui": "node src/ui/dev.ts",
     "docs:cli": "node tools/cli-docs.ts",
@@ -160,6 +160,7 @@
     "test:unit": "vp test run --project unit",
     "verify:ui": "npm run build:ui && node src/ui/verify.ts",
     "verify:worker": "node tools/verify-worker.ts",
+    "version": "node tools/generate-version.ts && git add src/cli/version.ts",
     "watch:ui": "vp build --watch"
   },
   "devDependencies": {

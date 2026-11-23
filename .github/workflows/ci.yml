@@ -1,7 +1,10 @@
 name: CI
 
 on:
+  # Branch pushes only: a release tag points at a commit main already tested,
+  # so tag pushes would run the same suite twice.
   push:
+    branches: [main]
   pull_request:
 
 permissions:

@@ -111,9 +111,10 @@ The adjacent archive `.sha256` checks the compressed bytes. Verify it before
 extracting, then verify `CONTENTS.sha256` inside the extracted directory before
 installation. These checks provide integrity, not publisher authentication.
 
-CI runs on every push, version tags included; it tests the tagged source and
-the rehearsal archive but no longer packages release candidates. The release
-workflow's draft and npm publish wait on a green CI run for the same tag.
+CI runs on pushes to `main` and on pull requests, not on tag pushes: a version
+tag points at a commit `main` already tested. It tests the source and the
+rehearsal archive but no longer packages release candidates. The release
+workflow's draft and npm publish wait on a green CI run for the tagged commit.
 
 `.github/workflows/release.yml` builds, packages (`tools/package-standalone.ts`)
 and smoke-tests the executable for linux-x64, linux-arm64, darwin-arm64 and
@@ -123,7 +124,7 @@ source and exercised end to end; the installation report is retained as
 `installation-<target>` for 30 days. The workflow then attests the archives,
 verifies the attestation against this repository, `release.yml`, the run's ref
 and commit and GitHub-hosted runners, and attaches them to a **draft** GitHub
-Release. Publish the draft only after CI on that tag is green; the workflow
+Release. Publish the draft only after CI on the tagged commit is green; the workflow
 refuses to change assets on a release that is already published. Each release
 carries:
 
