@@ -56,6 +56,12 @@ jobs:
           # The executable embeds this runtime; build and verify with the same one.
           node-version: 26
           cache: npm
+      - name: Check tag matches package version
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          test "$TAG" = "v$version" || { echo "::error::tag $TAG does not match package.json version v$version"; exit 1; }
       - run: npm ci
       # A release ships Developer ID–signed, notarized macOS executables, so a
       # downloaded copy passes Gatekeeper. The certificate lives only in a
