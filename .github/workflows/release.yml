@@ -2,8 +2,9 @@ name: Release
 
 # Builds the single executable (`npm run build:sea`) on each supported
 # platform for a version tag, packages and verifies it with the same tools CI
-# uses, attests the archives and attaches them to a *draft* GitHub Release.
-# Publishing the draft is a manual step, taken once CI on the tagged commit is green.
+# uses, waits for CI to pass on the tagged commit, then attests the archives
+# and attaches them to a *draft* GitHub Release. Publishing the draft is a
+# manual step.
 # The npm package is packed once; that tarball is attached to the release and
 # is the exact file published with trusted publishing (OIDC) behind the `npm`
 # environment.
@@ -209,9 +210,41 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # Nothing is drafted or published until CI is green on the tagged commit.
+  # CI runs on the `main` push of that commit, not on the tag, so a tag on a
+  # commit main never received has no run and fails here.
+  ci:
+    name: Wait for CI
+    if: github.repository == 'chr33s/git'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Wait for CI on the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          sha="$(gh api "repos/$GH_REPO/commits/refs/tags/$TAG" --jq .sha)"
+          echo "Waiting on CI for $TAG ($sha)"
+          # The main push and the tag push land together; give CI time to queue.
+          for _ in $(seq 30); do
+            run="$(gh run list --workflow ci.yml --branch main --event push --commit "$sha" \
+              --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+            test -n "$run" && break
+            sleep 10
+          done
+          test -n "$run" || { echo "::error::no CI run on main for $sha; push the commit to main first"; exit 1; }
+          gh run watch "$run" --exit-status --interval 30 >/dev/null \
+            || { echo "::error::CI run $run did not succeed"; exit 1; }
+          echo "CI run $run succeeded"
+
   github:
     name: Draft GitHub Release
-    needs: [build, pack]
+    needs: [build, pack, ci]
     if: github.repository == 'chr33s/git'
     runs-on: ubuntu-latest
     permissions:
@@ -297,7 +330,7 @@ jobs:
 
   npm:
     name: Publish to npm
-    needs: [build, pack, github]
+    needs: [build, pack, ci, github]
     if: github.repository == 'chr33s/git'
     runs-on: ubuntu-latest
     environment: npm
