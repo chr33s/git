@@ -194,6 +194,15 @@ const stopWorker = async () => {
     clearTimeout(force);
   }
 };
+// Worker logs reach this process through alchemy's piped stdout, which can lag
+// the HTTP response that caused them; wait for a line rather than sampling once.
+const logged = async (pattern: RegExp, message = `worker never logged ${pattern}`) => {
+  const deadline = Date.now() + 15_000;
+  while (!pattern.test(output) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.match(output, pattern, message);
+};
 const startWorker = async () => {
   output = "";
   child = spawnWorker();
@@ -429,7 +438,7 @@ try {
     legacyContent,
   );
   await git("-C", "legacy-public-client", "fsck", "--strict");
-  assert.match(output, /snapshot age observed/, "actual edge must report loaded snapshot age");
+  await logged(/snapshot age observed/, "actual edge must report loaded snapshot age");
   await verifyAdmission(repo);
   await verifyDeadline(repo);
   await operatorBucket(async (bucket) => {
@@ -453,7 +462,7 @@ try {
     );
     await response.arrayBuffer();
   }
-  assert.match(output, /snapshot invalidation failed/);
+  await logged(/snapshot invalidation failed/);
   await operatorBucket(async (bucket) => {
     const previous = await bucket.get(Snapshot.keyOf("release-proof"));
     assert.ok(previous, "the injected delete failure must leave the previous snapshot present");
@@ -474,7 +483,7 @@ try {
   });
   assert.equal(privateRead.status, 401, "provisioning must fence the previous anonymous snapshot");
   await privateRead.arrayBuffer();
-  assert.match(output, /snapshot publication failed/);
+  await logged(/snapshot publication failed/);
   await operatorBucket(async (bucket) => {
     assert.equal(
       await bucket.get(Snapshot.keyOf("release-proof")),
@@ -715,8 +724,8 @@ try {
     authedGit("-C", "private-client", "push", "origin", "HEAD:refs/heads/quota-proof"),
     /unpack|500|remote rejected/,
   );
-  assert.match(output, /GitStorage/);
-  assert.match(output, /quota_exceeded/);
+  await logged(/GitStorage/);
+  await logged(/quota_exceeded/);
   assert.ok(!output.includes(member.credential), "quota diagnostics must not contain credentials");
   assert.equal((await authedGit("ls-remote", repo, "refs/heads/quota-proof")).stdout.trim(), "");
   assert.equal(
@@ -733,7 +742,7 @@ try {
     /unpack|500|remote rejected/,
   );
   assert.equal((await authedGit("ls-remote", repo, "refs/heads/quota-proof")).stdout.trim(), "");
-  assert.match(output, /metadata_rows/);
+  await logged(/metadata_rows/);
   await stopWorker();
   refMetadataRows = "100000";
   doCapacity = "2";
@@ -1043,7 +1052,7 @@ try {
     assert.equal(refused.status, 500, "lowered SQL registry quota must refuse additions");
     assert.ok(!(await refused.text()).includes(registrySecret));
   }
-  assert.match(output, /Administrative registry capacity exhausted/);
+  await logged(/Administrative registry capacity exhausted/);
   assert.ok(!output.includes(registrySecret));
   await stopWorker();
   await restoreLocalState(alchemyRoot, path.join(scratch, "backup"));
@@ -1113,12 +1122,12 @@ try {
   });
   assert.equal(stillGranted.status, 200, "refused revocation must preserve the prior membership");
   await stillGranted.arrayBuffer();
-  assert.match(output, /snapshot invalidation failed/);
+  await logged(/snapshot invalidation failed/);
   await stopWorker();
   await snapshotFault(localStorage, sentinel, Snapshot.keyOf("release-proof"), "write");
   await startWorker();
   await pushRevocation();
-  assert.match(output, /snapshot publication failed/);
+  await logged(/snapshot publication failed/);
   await operatorBucket(async (bucket) => {
     assert.equal(await bucket.get(Snapshot.keyOf("release-proof")), null);
   });
@@ -1199,15 +1208,11 @@ try {
   await page.goto(`${origin}/hub/tasks`, { waitUntil: "networkidle" });
   await page.locator(".gp-sidebar").waitFor({ state: "visible", timeout: 10_000 });
   assert.deepEqual(errors, []);
-  assert.match(
-    output,
-    /snapshot publication completed/,
-    "actual writer must report publication timing",
-  );
-  assert.match(output, /response_ready/, "actual runtime must emit response telemetry");
-  assert.match(output, /response_body_complete/, "actual runtime must observe consumed bodies");
-  assert.match(output, /CloudflareEdge/, "edge observations must be distinguishable");
-  assert.match(output, /CloudflareHost/, "DO observations must be distinguishable");
+  await logged(/snapshot publication completed/, "actual writer must report publication timing");
+  await logged(/response_ready/, "actual runtime must emit response telemetry");
+  await logged(/response_body_complete/, "actual runtime must observe consumed bodies");
+  await logged(/CloudflareEdge/, "edge observations must be distinguishable");
+  await logged(/CloudflareHost/, "DO observations must be distinguishable");
   assert.doesNotMatch(
     output,
     new RegExp(malformedSecret),
