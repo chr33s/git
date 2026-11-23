@@ -91,7 +91,17 @@ describe.skipIf(!hasGit)("push memory", () => {
       `;
         const result = await promisify(execFile)(
           process.execPath,
-          ["--expose-gc", "--input-type=module", "-e", script],
+          // V8 frees ArrayBuffer backing stores on a background sweeper, so
+          // `arrayBuffers` keeps counting collected garbage until that thread
+          // catches up; on a loaded runner the lag reached 38 MB. Sweeping on
+          // the main thread makes each gc() sample exact.
+          [
+            "--expose-gc",
+            "--no-concurrent-array-buffer-sweeping",
+            "--input-type=module",
+            "-e",
+            script,
+          ],
           // The suite allows 120 seconds on a loaded machine. Leave time for
           // cleanup while retaining the same measured live-buffer assertion.
           { timeout: 100_000 },
